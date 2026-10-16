@@ -1,0 +1,11 @@
+M-ONUR KAREKOD OKUYUCU – KAYNAK KOD BİLGİSİ (16.10.2026)
+=======================================================
+Asıl (güncel) kaynak kod GitHub'dadır:  https://github.com/MHMD2907/karekod-okuyucu
+  mobil_app_yeni/   -> telefon uygulaması (Flutter)
+  karekod_sunucu/   -> PC sunucusu (Python / PyQt6)
+
+APK ve EXE GitHub'da otomatik derlenir (Actions) ve "Releases" sayfasına konur.
+Bu bilgisayarda Android SDK / Flutter kurulu olmasına gerek yoktur.
+
+Bu klasör GitHub'daki kodun yerel kopyasıdır (16.10.2026'da eşitlendi).
+İMZA ANAHTARI: IMZA_ANAHTARI_YEDEK klasörü – SİLMEYİN, ayrıca USB/buluta yedekleyin.
