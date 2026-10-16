@@ -1,4 +1,4 @@
-// lib/main.dart - V60.2 (2026-10-16): IP karekodu ham metinden okunuyor + IP'ye :5000 otomatik ekleniyor
+// lib/main.dart - V60.3 (2026-10-16): SKT gün=00 ve eski yıllar okunuyor, ANLIK tekrar gönderme yok, paket adı uyumu
 
 import 'dart:async';
 import 'dart:convert';
@@ -38,6 +38,22 @@ String normalizeCode(String? raw) {
   return raw.replaceAll(RegExp(r'[^a-zA-Z0-9]+'), '').trim();
 }
 
+// V60.3: Paket adı QR'da, sunucu dosya adında ve okutunca aynı kalsın diye
+// Türkçe harfler sadeleştirilir, harf/rakam dışı her şey atılır; boşsa otomatik ad
+String paketAdiDuzelt(String ad) {
+  const tr = {
+    'ç': 'c', 'Ç': 'C', 'ğ': 'g', 'Ğ': 'G', 'ı': 'i', 'İ': 'I',
+    'ö': 'o', 'Ö': 'O', 'ş': 's', 'Ş': 'S', 'ü': 'u', 'Ü': 'U'
+  };
+  String s = ad.trim().split('').map((c) => tr[c] ?? c).join();
+  s = s.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '');
+  if (s.startsWith('01')) s = 'P$s';
+  if (s.isEmpty) {
+    s = 'Paket${DateTime.now().millisecondsSinceEpoch ~/ 1000}';
+  }
+  return s;
+}
+
 String formatForMedula(String rawCode, Map<String, String> info) {
   return rawCode;
 }
@@ -64,12 +80,17 @@ Map<String, String> parseGS1ForLabel(String code) {
           int y = int.parse(potentialDate.substring(0, 2));
           int m = int.parse(potentialDate.substring(2, 4));
           int d = int.parse(potentialDate.substring(4, 6));
-          bool isValidDate = (m >= 1 && m <= 12) && (d >= 1 && d <= 31);
-          if (y < 23) isValidDate = false;
+          // V60.3: gün 00 = ay sonu (GS1). Yıl bugünden ±12 yıl içinde olmalı
+          // (eskiden y<23 reddediliyordu: 2022 ve öncesi miadı geçmişler "geçerli" görünüyordu)
+          int fullYear = 2000 + y;
+          int nowY = DateTime.now().year;
+          bool isValidDate = (m >= 1 && m <= 12) &&
+              (d >= 0 && d <= 31) &&
+              fullYear >= nowY - 12 &&
+              fullYear <= nowY + 12;
           if (isValidDate) {
             rawDateFound = potentialDate;
-            int fullYear = (y > 50) ? 1900 + y : 2000 + y;
-            if (d == 0) d = 1;
+            if (d == 0) d = DateTime(fullYear, m + 1, 0).day;
             expiryFormatted =
                 "${d.toString().padLeft(2, '0')}/${m.toString().padLeft(2, '0')}/$fullYear";
             dateStartIndex = i;
@@ -268,6 +289,8 @@ class _MainScannerScreenState extends State<MainScannerScreen>
 
   String _lastScannedCode = "";
   DateTime _lastScanSuccess = DateTime(2000);
+  // V60.3: ANLIK modda her kodun en son kadrajda görüldüğü an
+  final Map<String, DateTime> _anlikSonGorulme = {};
   Map<String, int> _gtinCounts = {};
   int _serverCount = 0;
 
@@ -593,11 +616,17 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     Gs1Status status = analyzeStatus(info['RAW_SKT'] ?? "");
 
     if (_isSingleMode) {
-      if (_lastScannedCode == code &&
-          DateTime.now()
-                  .difference(_lastScanSuccess)
-                  .inMilliseconds <
-              1000) {
+      // V60.3: kutu kadrajda durdukça tekrar gönderilmez (eskiden her 1 sn'de
+      // yeniden yapıştırılıyordu); kadrajdan çıkıp 4 sn geçince yeniden okunabilir
+      final DateTime simdi = DateTime.now();
+      final DateTime? sonGorulme = _anlikSonGorulme[code];
+      _anlikSonGorulme[code] = simdi;
+      if (_anlikSonGorulme.length > 500) {
+        _anlikSonGorulme.removeWhere(
+            (k, v) => simdi.difference(v).inSeconds > 60);
+      }
+      if (sonGorulme != null &&
+          simdi.difference(sonGorulme).inMilliseconds < 4000) {
         return false;
       }
       _updateInfoDisplay(status, code, 1);
@@ -1456,7 +1485,8 @@ class _MainScannerScreenState extends State<MainScannerScreen>
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context);
-              _showPackageQrDialog(context, controller.text);
+              _showPackageQrDialog(
+                  context, paketAdiDuzelt(controller.text));
             },
             child: const Text("DEVAM ET"),
           ),
@@ -1499,6 +1529,10 @@ class _MainScannerScreenState extends State<MainScannerScreen>
                 ),
               ),
               const SizedBox(height: 10),
+              Text(
+                pkgName,
+                style: const TextStyle(color: Colors.black),
+              ),
               Text(
                 "${listToSend.length} Kutu",
                 style: const TextStyle(
