@@ -1,4 +1,4 @@
-# v1 – 2026-10-16: M-ONUR Karekod Okuyucu APK'sı derlenip Releases'a konur (kalıcı imza anahtarıyla)
+# v1.1 – 2026-10-16: M-ONUR Karekod Okuyucu APK’sı derlenip Releases’a konur (kalıcı imza anahtarıyla); sadece mobil_app_yeni veya bu dosya değişince çalışır
 name: APK derle
 
 on:
