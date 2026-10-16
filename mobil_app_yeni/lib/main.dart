@@ -1,4 +1,4 @@
-// lib/main.dart - V60.3 (2026-10-16): SKT gün=00 ve eski yıllar okunuyor, ANLIK tekrar gönderme yok, paket adı uyumu
+// lib/main.dart - V61.0 (2026-10-16): ilaç adı (TİTCK), BİLGİ modu, sayım özeti, PC senkronu, yeni etiket, otomatik güncelleme, PIN
 
 import 'dart:async';
 import 'dart:convert';
@@ -165,7 +165,7 @@ Gs1Status analyzeStatus(String rawDate) {
       return Gs1Status("MİADI GEÇMİŞ", Colors.red, fmt, days);
     }
     if (days <= 30) {
-      return Gs1Status("<1 AY ($days Gn)", Colors.black, fmt, days);
+      return Gs1Status("<1 AY ($days Gn)", Colors.purpleAccent, fmt, days);
     }
     if (days <= 60) {
       return Gs1Status("<2 AY ($days Gn)", Colors.blue, fmt, days);
@@ -179,8 +179,107 @@ Gs1Status analyzeStatus(String rawDate) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// V61: Sunucu adresi (+ isteğe bağlı PIN) ve derleme numarası
+// ---------------------------------------------------------------------------
+String gSunucuPin = '';
+Uri sunucuUri(String ip, String yol) {
+  final u = Uri.parse('http://$ip$yol');
+  if (gSunucuPin.isEmpty) return u;
+  return u.replace(queryParameters: {...u.queryParameters, 'pin': gSunucuPin});
+}
+
+const int kDerlemeNo = int.fromEnvironment('BUILD_NUMBER', defaultValue: 0);
+
+Map<String, dynamic> jsonCozIsolate(String s) =>
+    jsonDecode(s) as Map<String, dynamic>;
+
+// ---------------------------------------------------------------------------
+// V61: TİTCK SKRS ilaç listesi (sunucudan indirilir, telefonda SQLite'ta durur)
+// ---------------------------------------------------------------------------
+class IlacBilgi {
+  final String ad, atc, etken, receteTuru, durum;
+  IlacBilgi(this.ad, this.atc, this.etken, this.receteTuru, this.durum);
+  bool get pasif => durum == 'P';
+  String get rozet {
+    final r = receteTuru.trim();
+    if (pasif) return r.isNotEmpty && r != 'Normal' ? 'PASİF • ${r.toUpperCase()}' : 'PASİF ÜRÜN';
+    if (r.isEmpty || r == 'Normal') return '';
+    return '${r.toUpperCase()} REÇETE';
+  }
+
+  Color get rozetRengi {
+    if (pasif) return Colors.grey;
+    switch (receteTuru.trim()) {
+      case 'Kırmızı':
+        return Colors.red;
+      case 'Yeşil':
+        return Colors.green;
+      case 'Mor':
+        return Colors.purple;
+      case 'Turuncu':
+        return Colors.orange;
+    }
+    return Colors.blueGrey;
+  }
+}
+
+class IlacListesi {
+  static final Map<String, IlacBilgi> _m = {};
+  static String surum = '';
+  static int get adet => _m.length;
+
+  static IlacBilgi? bul(String gtin) {
+    if (gtin.isEmpty) return null;
+    return _m[gtin.padLeft(14, '0')];
+  }
+
+  static Future<void> yukle() async {
+    try {
+      await DatabaseHelper.initDbIfNeeded();
+      final rows = await DatabaseHelper.db.query('ilaclar');
+      _m.clear();
+      for (final r in rows) {
+        _m[r['gtin'] as String] = IlacBilgi(
+            (r['ad'] ?? '') as String,
+            (r['atc'] ?? '') as String,
+            (r['etken'] ?? '') as String,
+            (r['rt'] ?? '') as String,
+            (r['durum'] ?? 'A') as String);
+      }
+      surum = (await SharedPreferences.getInstance()).getString('ilac_surum') ?? '';
+    } catch (_) {}
+  }
+
+  static Future<int> kaydet(Map<String, dynamic> veri) async {
+    final il = (veri['ilaclar'] as Map).cast<String, dynamic>();
+    final db = DatabaseHelper.db;
+    await db.transaction((txn) async {
+      await txn.delete('ilaclar');
+      final b = txn.batch();
+      il.forEach((g, v) {
+        final l = (v as List).map((e) => (e ?? '').toString()).toList();
+        b.insert('ilaclar', {
+          'gtin': g,
+          'ad': l[0],
+          'atc': l.length > 1 ? l[1] : '',
+          'etken': l.length > 2 ? l[2] : '',
+          'rt': l.length > 3 ? l[3] : '',
+          'durum': l.length > 4 ? l[4] : 'A'
+        });
+      });
+      await b.commit(noResult: true);
+    });
+    surum = (veri['surum'] ?? '').toString();
+    await (await SharedPreferences.getInstance()).setString('ilac_surum', surum);
+    await yukle();
+    return _m.length;
+  }
+}
+
 class DatabaseHelper {
   static Database? _db;
+  static Database get db => _db!;
 
   static Future<void> initDbIfNeeded() async {
     if (_db != null) return;
@@ -191,6 +290,10 @@ class DatabaseHelper {
       await db.execute(
           'CREATE TABLE codes (id INTEGER PRIMARY KEY AUTOINCREMENT, barcode TEXT, gtin TEXT, name TEXT, scanned_at TEXT)');
       await db.execute('CREATE INDEX idx_barcode ON codes(barcode)');
+    }, onOpen: (db) async {
+      // V61: ilaç listesi tablosu (eski kurulumlarda da açılışta oluşturulur)
+      await db.execute(
+          'CREATE TABLE IF NOT EXISTS ilaclar (gtin TEXT PRIMARY KEY, ad TEXT, atc TEXT, etken TEXT, rt TEXT, durum TEXT)');
     });
   }
 
@@ -217,7 +320,7 @@ class DatabaseHelper {
       batch.insert('codes', {
         'barcode': normalizeCode(c),
         'gtin': gtin,
-        'name': defaultName,
+        'name': IlacListesi.bul(gtin)?.ad ?? defaultName,
         'scanned_at': DateTime.now().toIso8601String()
       });
     }
@@ -243,6 +346,13 @@ class AppSettings {
   String get resolution => prefs.getString('cam_res') ?? 'medium';
   Future<void> setResolution(String v) async =>
       prefs.setString('cam_res', v);
+
+  // V61: sunucu PIN'i (sunucuda PIN açıksa)
+  String get pin => prefs.getString('server_pin') ?? '';
+  Future<void> setPin(String v) async {
+    gSunucuPin = v;
+    await prefs.setString('server_pin', v);
+  }
 }
 
 class QrPackingApp extends StatelessWidget {
@@ -277,7 +387,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
   List<CameraDescription> _cameras = [];
   CameraController? _controller;
   final BarcodeScanner _barcodeScanner =
-      BarcodeScanner(formats: [BarcodeFormat.all]);
+      BarcodeScanner(formats: [BarcodeFormat.dataMatrix, BarcodeFormat.qrCode]);
 
   bool _isProcessing = false;
   DateTime _lastProcessTime = DateTime.now();
@@ -319,6 +429,16 @@ class _MainScannerScreenState extends State<MainScannerScreen>
 
   bool _dynamicInvert = false;
 
+  // V61
+  final AudioPlayer _okPlayer = AudioPlayer();
+  final AudioPlayer _warnPlayer = AudioPlayer();
+  bool _bilgiModu = false;
+  bool _bilgiAcik = false;
+  bool _kameraAciliyor = false;
+  bool _sunucuKontrolYapildi = false;
+  String _lastRozet = "";
+  Color _lastRozetRenk = Colors.blueGrey;
+
   @override
   void initState() {
     super.initState();
@@ -346,28 +466,36 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     _barcodeScanner.close();
     _heartbeatTimer?.cancel();
     _bufferTimer?.cancel();
+    _okPlayer.dispose();
+    _warnPlayer.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) async {
-    if (_controller == null || !(_controller!.value.isInitialized)) return;
-
-    if (state == AppLifecycleState.inactive) {
+    // V61: kamera önce ekrandan ayrılır, sonra kapatılır (kapanmış kamerayla çizim hatası olmaz)
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      final c = _controller;
+      if (c == null) return;
+      _controller = null;
+      if (mounted) setState(() {});
       try {
-        if (_controller!.value.isStreamingImages) {
-          await _controller!.stopImageStream();
-        }
+        if (c.value.isStreamingImages) await c.stopImageStream();
       } catch (_) {}
-      await _controller!.dispose();
+      try {
+        await c.dispose();
+      } catch (_) {}
     } else if (state == AppLifecycleState.resumed) {
-      await _initializeCamera();
+      if (_controller == null) await _initializeCamera();
     }
   }
 
   Future<void> _initEverything() async {
     final prefs = await SharedPreferences.getInstance();
     settings = AppSettings(prefs);
+    gSunucuPin = settings!.pin;
+    await IlacListesi.yukle();
     setState(() {
       _invertColors = settings?.invertMode ?? false;
     });
@@ -404,8 +532,17 @@ class _MainScannerScreenState extends State<MainScannerScreen>
       {bool silent = false}) async {
     try {
       final response = await http
-          .get(Uri.parse('http://$serverIp/ping'))
+          .get(sunucuUri(serverIp, '/ping'))
           .timeout(const Duration(seconds: 2));
+      if (response.statusCode == 401) {
+        // V61: sunucuda PIN açık, telefondaki PIN yanlış/eksik
+        setState(() {
+          isConnected = false;
+          statusText = "PIN HATALI";
+          statusColor = Colors.red;
+        });
+        return;
+      }
       if (response.statusCode == 200) {
         if (!isConnected) {
           setState(() {
@@ -416,6 +553,10 @@ class _MainScannerScreenState extends State<MainScannerScreen>
                   color: Colors.green);
             }
           });
+          if (!_sunucuKontrolYapildi) {
+            _sunucuKontrolYapildi = true;
+            _sunucuSonrasiKontroller(serverIp);
+          }
         }
       } else {
         throw Exception();
@@ -433,12 +574,13 @@ class _MainScannerScreenState extends State<MainScannerScreen>
 
   // Kamerayı yeniden başlatmak için yardımcı fonksiyon
   Future<void> _restartCamera() async {
+    final c = _controller;
+    _controller = null;
+    if (mounted) setState(() {});
     try {
-      if (_controller != null) {
-        if (_controller!.value.isStreamingImages) {
-          await _controller!.stopImageStream();
-        }
-        await _controller!.dispose();
+      if (c != null) {
+        if (c.value.isStreamingImages) await c.stopImageStream();
+        await c.dispose();
       }
     } catch (_) {}
     await _initializeCamera();
@@ -446,6 +588,8 @@ class _MainScannerScreenState extends State<MainScannerScreen>
 
   // PERFORMANS AYARI + ÇÖZÜNÜRLÜK SEÇİMİ
   Future<void> _initializeCamera() async {
+    if (_kameraAciliyor) return; // V61: aynı anda iki kez açılmaz
+    _kameraAciliyor = true;
     try {
       _cameras = await availableCameras();
       if (_cameras.isNotEmpty) {
@@ -489,6 +633,8 @@ class _MainScannerScreenState extends State<MainScannerScreen>
       if (mounted) {
         setState(() => statusText = 'Kamera Hatası');
       }
+    } finally {
+      _kameraAciliyor = false;
     }
   }
 
@@ -587,19 +733,32 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     // V60.2: Sunucu IP karekodu normalizeCode'dan ÖNCE ham metinden kontrol edilir
     // (normalizeCode nokta ve iki noktayı sildiği için IP hiç tanınmıyordu)
     final String rawTrim = rawCode.trim();
-    if (RegExp(r'^\d{1,3}(\.\d{1,3}){3}:\d+$').hasMatch(rawTrim)) {
-      if (settings?.serverIp != rawTrim) {
-        settings?.setServerIp(rawTrim);
+    final ipEs = RegExp(r'^(\d{1,3}(?:\.\d{1,3}){3}:\d+)(?:#(\d{4}))?$')
+        .firstMatch(rawTrim);
+    if (ipEs != null) {
+      final ip = ipEs.group(1)!;
+      final pin = ipEs.group(2) ?? '';
+      if (settings?.serverIp != ip || settings?.pin != pin) {
+        settings?.setServerIp(ip);
+        settings?.setPin(pin);
+        _sunucuKontrolYapildi = false;
+        isConnected = false;
         _showTemporaryMessage(
-            'IP: $rawTrim', const Duration(seconds: 3),
+            'IP: $ip${pin.isNotEmpty ? " (PIN)" : ""}', const Duration(seconds: 3),
             color: Colors.cyanAccent);
-        _testServerConnection(rawTrim);
+        _testServerConnection(ip);
       }
       return false;
     }
 
     String code = normalizeCode(rawCode);
     if (code.isEmpty) return false;
+
+    // V61: BİLGİ modu – hiçbir şey kaydedilmez/gönderilmez, sadece ilaç kartı açılır
+    if (_bilgiModu) {
+      if (code.startsWith("01") && code.length >= 16) _bilgiGoster(code);
+      return false;
+    }
 
     if (code.length < 50 && !code.startsWith("01")) {
       if (DateTime.now()
@@ -675,7 +834,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     _gtinCounts[gtin] = (_gtinCounts[gtin] ?? 0) + 1;
 
     DatabaseHelper.insertCodeFast(
-        code, gtin, "İlaç/Ürün");
+        code, gtin, IlacListesi.bul(gtin)?.ad ?? "İlaç/Ürün");
     _lastScanSuccess = DateTime.now();
     _lastScannedCode = code;
     _updateInfoDisplay(
@@ -697,7 +856,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     try {
       final response = await http
           .post(
-            Uri.parse('http://$serverIp/append_pool'),
+            sunucuUri(serverIp, '/append_pool'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({'codes': toSend}),
           )
@@ -725,45 +884,111 @@ class _MainScannerScreenState extends State<MainScannerScreen>
 
   Future<void> _pastePoolToPC() async {
     final serverIp = settings?.serverIp ?? '';
-    if (serverIp.isEmpty) return;
+    if (serverIp.isEmpty) {
+      _showTemporaryMessage("Önce IP Ayarla!", const Duration(seconds: 2),
+          color: Colors.red);
+      return;
+    }
     setState(() => busy = true);
+    int adet = 0;
+    bool basarili = false;
     try {
+      // V61: telefonun tam listesi gönderilir (PC yeniden başlamış olsa bile eksik yapıştırılmaz)
       final res = await http
-          .post(Uri.parse('http://$serverIp/paste_pool'));
+          .post(sunucuUri(serverIp, '/paste_pool'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({'codes': scannedCodes.toList()}))
+          .timeout(const Duration(seconds: 20));
       if (res.statusCode == 200) {
+        final d = jsonDecode(utf8.decode(res.bodyBytes));
+        adet = (d['count'] ?? 0) as int;
+        basarili = adet > 0;
+        _networkBuffer.clear();
         _playBeep(warning: false);
         _showTemporaryMessage(
-            "PC'YE AKTARILDI", const Duration(seconds: 3),
+            "PC'YE AKTARILDI ($adet)", const Duration(seconds: 3),
             color: Colors.green);
+      } else {
+        _showTemporaryMessage("PC HATASI", const Duration(seconds: 2),
+            color: Colors.red);
       }
     } catch (e) {
       _showTemporaryMessage(
-          "HATA", const Duration(seconds: 2),
+          "PC'YE ULAŞILAMADI", const Duration(seconds: 2),
           color: Colors.red);
     } finally {
-      setState(() => busy = false);
+      if (mounted) setState(() => busy = false);
+    }
+    if (basarili && mounted) {
+      final temizle = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text("PC'ye aktarıldı"),
+          content: Text("$adet kutu Medula/PC'ye yapıştırıldı.\nListe temizlensin mi?"),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(c, false),
+                child: const Text("SAKLA")),
+            ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () => Navigator.pop(c, true),
+                child: const Text("TEMİZLE")),
+          ],
+        ),
+      );
+      if (temizle == true) await _clearPool();
     }
   }
 
   Future<void> _clearPool() async {
+    // V61: telefon listesi + veritabanı her durumda temizlenir; PC havuzu ulaşılabilirse temizlenir
     final serverIp = settings?.serverIp ?? '';
-    if (serverIp.isEmpty) return;
-    try {
-      await http.post(Uri.parse('http://$serverIp/clear_pool'));
-      setState(() {
-        scannedCodes.clear();
-        scannedGtins.clear();
-        scannedTimestamps.clear();
-        _serverCount = 0;
-        _gtinCounts.clear();
-        _updateStatusText();
-      });
-      await DatabaseHelper.clearCodes();
-      _showTemporaryMessage(
-          "LİSTE TEMİZLENDİ",
-          const Duration(seconds: 2),
-          color: Colors.orange);
-    } catch (e) {}
+    bool pcTamam = serverIp.isEmpty;
+    if (serverIp.isNotEmpty) {
+      try {
+        final r = await http
+            .post(sunucuUri(serverIp, '/clear_pool'))
+            .timeout(const Duration(seconds: 4));
+        pcTamam = r.statusCode == 200;
+      } catch (_) {}
+    }
+    await DatabaseHelper.clearCodes();
+    _networkBuffer.clear();
+    if (!mounted) return;
+    setState(() {
+      scannedCodes.clear();
+      scannedGtins.clear();
+      scannedTimestamps.clear();
+      _serverCount = 0;
+      _gtinCounts.clear();
+      _updateStatusText();
+    });
+    _showTemporaryMessage(
+        pcTamam ? "LİSTE TEMİZLENDİ" : "TELEFON TEMİZLENDİ (PC'ye ulaşılamadı)",
+        const Duration(seconds: 3),
+        color: Colors.orange);
+  }
+
+  // V61: listeden tek kayıt silinince ana ekran sayaçları ve PC havuzu da güncellenir
+  Future<void> _kayitSilindi(String barcode) async {
+    final code = normalizeCode(barcode);
+    final kalan = await DatabaseHelper.loadAllCodes();
+    final halaVar = kalan.any((r) => normalizeCode(r['barcode']) == code);
+    if (!halaVar) {
+      _networkBuffer.remove(code);
+      final serverIp = settings?.serverIp ?? '';
+      if (serverIp.isNotEmpty) {
+        try {
+          await http
+              .post(sunucuUri(serverIp, '/remove_pool'),
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode({'codes': [code]}))
+              .timeout(const Duration(seconds: 4));
+        } catch (_) {}
+      }
+    }
+    await _reloadListFromDb();
+    _updateStatusText();
   }
 
   Future<void> _tryImportPackageFromServer(String pkgName) async {
@@ -771,8 +996,8 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     if (serverIp.isEmpty) return;
     try {
       final response = await http
-          .get(Uri.parse(
-              'http://$serverIp/get_package?name=$pkgName'))
+          .get(sunucuUri(serverIp,
+              '/get_package?name=${Uri.encodeQueryComponent(pkgName)}'))
           .timeout(const Duration(seconds: 3));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -808,8 +1033,11 @@ class _MainScannerScreenState extends State<MainScannerScreen>
         _lastExpDate = status.date;
         _lastDaysLeft = "${status.days}";
         _lastStatus = status.text;
-        _lastItemName =
+        final ilac = IlacListesi.bul(parseGS1ForLabel(code)['GTIN'] ?? '');
+        _lastItemName = ilac?.ad ??
             "...${code.substring(code.length > 10 ? code.length - 10 : 0)}";
+        _lastRozet = ilac?.rozet ?? "";
+        _lastRozetRenk = ilac?.rozetRengi ?? Colors.blueGrey;
         _lastTotalCount = totalCount;
       });
     }
@@ -825,7 +1053,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
 
     http
         .post(
-      Uri.parse('http://$serverIp/send'),
+      sunucuUri(serverIp, '/send'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'barcodes': [code]}),
     )
@@ -863,7 +1091,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
   void _updateStatusText() {
     if (mounted) {
       setState(() {
-        String mode = _isSingleMode ? "ANLIK" : "LİSTE";
+        String mode = _bilgiModu ? "BİLGİ" : (_isSingleMode ? "ANLIK" : "LİSTE");
         statusText =
             "$mode | Kutu: ${scannedCodes.length} (PC: $_serverCount)";
         if (!statusText.contains("HATA") &&
@@ -890,7 +1118,9 @@ class _MainScannerScreenState extends State<MainScannerScreen>
 
   Future<void> _playBeep({required bool warning}) async {
     try {
-      final player = AudioPlayer();
+      // V61: iki kalıcı oynatıcı (eskiden her bipte yeni oynatıcı açılıp kapatılmıyordu)
+      final player = warning ? _warnPlayer : _okPlayer;
+      await player.stop();
       await player.play(
         AssetSource(warning
             ? 'default_warn.mp3'
@@ -918,7 +1148,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
         try {
           var request = http.MultipartRequest(
               'POST',
-              Uri.parse('http://$serverIp/upload'));
+              sunucuUri(serverIp, '/upload'));
           for (var img in images) {
             request.files.add(
               await http.MultipartFile.fromPath(
@@ -955,7 +1185,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
         try {
           var request = http.MultipartRequest(
               'POST',
-              Uri.parse('http://$serverIp/upload'));
+              sunucuUri(serverIp, '/upload'));
           request.files.add(
             await http.MultipartFile.fromPath(
                 'image', image.path),
@@ -1003,7 +1233,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
       try {
         var request = http.MultipartRequest(
           'POST',
-          Uri.parse('http://$serverIp/upload_general'),
+          sunucuUri(serverIp, '/upload_general'),
         );
         for (var file in result.files) {
           if (file.path != null) {
@@ -1139,12 +1369,29 @@ class _MainScannerScreenState extends State<MainScannerScreen>
                   children: [
                     Text(
                       "$_lastItemName (x$_lastTotalCount)",
+                      textAlign: TextAlign.center,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
                       ),
                     ),
+                    if (_lastRozet.isNotEmpty)
+                      Container(
+                        margin: const EdgeInsets.only(top: 4),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                            color: _lastRozetRenk,
+                            borderRadius: BorderRadius.circular(6)),
+                        child: Text(_lastRozet,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold)),
+                      ),
                     const SizedBox(height: 5),
                     Row(
                       mainAxisAlignment:
@@ -1208,7 +1455,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
                   ],
                 ),
               ),
-              if (!_isSingleMode)
+              if (!_isSingleMode && !_bilgiModu)
                 Container(
                   margin: const EdgeInsets.symmetric(
                       horizontal: 10, vertical: 2),
@@ -1248,67 +1495,21 @@ class _MainScannerScreenState extends State<MainScannerScreen>
                     horizontal: 10, vertical: 5),
                 child: Row(
                   children: [
-                    Expanded(
-                      child: InkWell(
-                        onTap: () => setState(() {
-                          _isSingleMode = true;
-                          _updateStatusText();
-                        }),
-                        child: Container(
-                          padding:
-                              const EdgeInsets.symmetric(
-                                  vertical: 12),
-                          decoration: BoxDecoration(
-                            color: _isSingleMode
-                                ? Colors.blueAccent
-                                : Colors.black54,
-                            borderRadius:
-                                BorderRadius.circular(8),
-                          ),
-                          child: const Center(
-                            child: Text(
-                              "ANLIK (Gönder)",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight:
-                                    FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: InkWell(
-                        onTap: () => setState(() {
-                          _isSingleMode = false;
-                          _updateStatusText();
-                        }),
-                        child: Container(
-                          padding:
-                              const EdgeInsets.symmetric(
-                                  vertical: 12),
-                          decoration: BoxDecoration(
-                            color: !_isSingleMode
-                                ? Colors.orange
-                                : Colors.black54,
-                            borderRadius:
-                                BorderRadius.circular(8),
-                          ),
-                          child: const Center(
-                            child: Text(
-                              "LİSTE (Biriktir)",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight:
-                                    FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
+                    _modDugmesi("ANLIK (Gönder)", Colors.blueAccent,
+                        _isSingleMode && !_bilgiModu, () {
+                      _isSingleMode = true;
+                      _bilgiModu = false;
+                    }),
+                    const SizedBox(width: 6),
+                    _modDugmesi("LİSTE (Biriktir)", Colors.orange,
+                        !_isSingleMode && !_bilgiModu, () {
+                      _isSingleMode = false;
+                      _bilgiModu = false;
+                    }),
+                    const SizedBox(width: 6),
+                    _modDugmesi("BİLGİ", Colors.teal, _bilgiModu, () {
+                      _bilgiModu = true;
+                    }),
                   ],
                 ),
               ),
@@ -1383,11 +1584,158 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     );
   }
 
-  void _showMenu(BuildContext context) {
+  // V61: mod düğmesi
+  Widget _modDugmesi(String yazi, Color renk, bool secili, VoidCallback sec) {
+    return Expanded(
+      child: InkWell(
+        onTap: () => setState(() {
+          sec();
+          _updateStatusText();
+        }),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: secili ? renk : Colors.black54,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Center(
+            child: Text(
+              yazi,
+              style: const TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // V61: BİLGİ modunda okunan kutunun kartı
+  void _bilgiGoster(String code) {
+    final simdi = DateTime.now();
+    final son = _anlikSonGorulme[code];
+    _anlikSonGorulme[code] = simdi;
+    if (_bilgiAcik) return;
+    if (son != null && simdi.difference(son).inMilliseconds < 3000) return;
+    _bilgiAcik = true;
+    _playBeep(warning: false);
+    final gtin = parseGS1ForLabel(code)['GTIN'] ?? '';
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
-      builder: (c) => Column(
+      builder: (c) => ilacKarti(code, _gtinCounts[gtin] ?? 0),
+    ).whenComplete(() {
+      _bilgiAcik = false;
+      _anlikSonGorulme[code] = DateTime.now();
+    });
+  }
+
+  // V61: sunucuya ilk bağlanınca ilaç listesi ve uygulama güncellemesi kontrol edilir
+  Future<void> _sunucuSonrasiKontroller(String ip) async {
+    await _ilacListesiGuncelle(ip, sessiz: true);
+    await _guncellemeKontrol(ip, sessiz: true);
+  }
+
+  Future<void> _ilacListesiGuncelle(String ip,
+      {bool sessiz = false, bool zorla = false}) async {
+    try {
+      final r = await http
+          .get(sunucuUri(ip, '/ilac_listesi_surum'))
+          .timeout(const Duration(seconds: 5));
+      if (r.statusCode != 200) return;
+      final d = jsonDecode(utf8.decode(r.bodyBytes));
+      final surum = (d['surum'] ?? '').toString();
+      final adet = (d['adet'] ?? 0) as num;
+      if (surum.isEmpty || adet == 0) {
+        if (!sessiz) {
+          _showTemporaryMessage("PC'de ilaç listesi yok",
+              const Duration(seconds: 3),
+              color: Colors.orange);
+        }
+        return;
+      }
+      if (!zorla && surum == IlacListesi.surum && IlacListesi.adet > 0) {
+        if (!sessiz) {
+          _showTemporaryMessage("İlaç listesi güncel (${IlacListesi.adet})",
+              const Duration(seconds: 2),
+              color: Colors.green);
+        }
+        return;
+      }
+      _showTemporaryMessage("İLAÇ LİSTESİ İNDİRİLİYOR...",
+          const Duration(seconds: 4),
+          color: Colors.yellow);
+      final r2 = await http
+          .get(sunucuUri(ip, '/ilac_listesi'))
+          .timeout(const Duration(seconds: 90));
+      if (r2.statusCode != 200) return;
+      final veri = await compute(jsonCozIsolate, utf8.decode(r2.bodyBytes));
+      final n = await IlacListesi.kaydet(veri);
+      _showTemporaryMessage("İLAÇ LİSTESİ: $n ürün",
+          const Duration(seconds: 3),
+          color: Colors.green);
+    } catch (_) {
+      if (!sessiz) {
+        _showTemporaryMessage("İlaç listesi alınamadı",
+            const Duration(seconds: 3),
+            color: Colors.red);
+      }
+    }
+  }
+
+  Future<void> _guncellemeKontrol(String ip, {bool sessiz = false}) async {
+    try {
+      final r = await http
+          .get(sunucuUri(ip, '/surum'))
+          .timeout(const Duration(seconds: 5));
+      if (r.statusCode != 200) return;
+      final d = jsonDecode(utf8.decode(r.bodyBytes));
+      final apk = d['apk'];
+      final int build = (d['build'] ?? 0) as int;
+      if (apk == null || build <= kDerlemeNo) {
+        if (!sessiz) {
+          _showTemporaryMessage("Uygulama güncel", const Duration(seconds: 2),
+              color: Colors.green);
+        }
+        return;
+      }
+      if (!mounted) return;
+      final indir = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text("Yeni sürüm hazır"),
+          content: Text(
+              "Sürüm ${d['version']} (derleme $build) PC'de hazır.\n\nİndirdikten sonra dosyayı açıp GÜNCELLE deyin. Listeniz ve ayarlarınız korunur."),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(c, false),
+                child: const Text("SONRA")),
+            ElevatedButton(
+                onPressed: () => Navigator.pop(c, true),
+                child: const Text("İNDİR")),
+          ],
+        ),
+      );
+      if (indir == true) {
+        await launchUrl(sunucuUri(ip, '/guncelleme/$apk'),
+            mode: LaunchMode.externalApplication);
+      }
+    } catch (_) {
+      if (!sessiz) {
+        _showTemporaryMessage("PC'ye ulaşılamadı", const Duration(seconds: 2),
+            color: Colors.red);
+      }
+    }
+  }
+
+  void _showMenu(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.grey[900],
+      builder: (c) => SafeArea(
+          child: SingleChildScrollView(
+              child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           ListTile(
@@ -1412,6 +1760,41 @@ class _MainScannerScreenState extends State<MainScannerScreen>
             onTap: () {
               Navigator.pop(c);
               _showNameDialog(context);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.summarize, color: Colors.tealAccent),
+            title: const Text(
+              "Sayım Özeti / Miad Raporu",
+              style: TextStyle(color: Colors.white),
+            ),
+            onTap: () {
+              Navigator.pop(c);
+              _sayimOzetiAc();
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.medication, color: Colors.purpleAccent),
+            title: Text(
+              "İlaç Listesini Güncelle (${IlacListesi.adet})",
+              style: const TextStyle(color: Colors.white),
+            ),
+            onTap: () {
+              Navigator.pop(c);
+              final ip = settings?.serverIp ?? '';
+              if (ip.isNotEmpty) _ilacListesiGuncelle(ip, zorla: true);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.system_update, color: Colors.lightBlueAccent),
+            title: Text(
+              "Uygulama Güncellemesi (derleme $kDerlemeNo)",
+              style: const TextStyle(color: Colors.white),
+            ),
+            onTap: () {
+              Navigator.pop(c);
+              final ip = settings?.serverIp ?? '';
+              if (ip.isNotEmpty) _guncellemeKontrol(ip);
             },
           ),
           const Divider(),
@@ -1440,7 +1823,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
             },
           ),
         ],
-      ),
+      ))),
     );
   }
 
@@ -1450,16 +1833,18 @@ class _MainScannerScreenState extends State<MainScannerScreen>
       MaterialPageRoute(
         builder: (ctx) => DetailListScreen(
           settings: settings!,
-          onClear: () {
-            setState(() {
-              scannedCodes.clear();
-              scannedGtins.clear();
-              scannedTimestamps.clear();
-              _gtinCounts.clear();
-              _updateStatusText();
-            });
-          },
+          onClear: _clearPool,
+          onDelete: _kayitSilindi,
         ),
+      ),
+    ).then((_) => _reloadListFromDb());
+  }
+
+  void _sayimOzetiAc() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (ctx) => SayimOzetiScreen(settings: settings!),
       ),
     );
   }
@@ -1574,7 +1959,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
       };
       final response = await http
           .post(
-            Uri.parse('http://${settings!.serverIp}/package'),
+            sunucuUri(settings!.serverIp, '/package'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode(payload),
           )
@@ -1604,15 +1989,16 @@ class _MainScannerScreenState extends State<MainScannerScreen>
 
 class DetailListScreen extends StatefulWidget {
   final AppSettings settings;
-  final VoidCallback onClear;
+  final Future<void> Function() onClear;
+  final Future<void> Function(String barcode) onDelete;
   const DetailListScreen(
       {super.key,
       required this.settings,
-      required this.onClear});
+      required this.onClear,
+      required this.onDelete});
 
   @override
-  State<DetailListScreen> createState() =>
-      _DetailListScreenState();
+  State<DetailListScreen> createState() => _DetailListScreenState();
 }
 
 class _DetailListScreenState extends State<DetailListScreen> {
@@ -1628,26 +2014,47 @@ class _DetailListScreenState extends State<DetailListScreen> {
 
   Future<void> _loadItems() async {
     final rows = await DatabaseHelper.loadAllCodes();
+    if (!mounted) return;
     setState(() {
       items = List.from(rows.reversed);
       loading = false;
     });
   }
 
-  Future<void> _deleteItem(int id) async {
-    final db = DatabaseHelper._db;
-    await db!.delete(
-      'codes',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+  // V61: silinen kayıt ana ekran sayacından ve PC havuzundan da düşer
+  Future<void> _deleteItem(Map<String, dynamic> item) async {
+    await DatabaseHelper.db
+        .delete('codes', where: 'id = ?', whereArgs: [item['id']]);
+    await widget.onDelete((item['barcode'] ?? '').toString());
     _loadItems();
   }
 
-  Future<void> _updateName(
-      int id, String currentName) async {
-    TextEditingController tc =
-        TextEditingController(text: currentName);
+  // V61: tümünü sil onay ister; telefon, veritabanı ve PC havuzu birlikte temizlenir
+  Future<void> _tumunuSil() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text("Tüm liste silinsin mi?"),
+        content: Text(
+            "Telefondaki ${items.length} kayıt ve PC havuzu temizlenecek."),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text("VAZGEÇ")),
+          ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text("SİL")),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await widget.onClear();
+    if (mounted) Navigator.pop(context);
+  }
+
+  Future<void> _updateName(int id, String currentName) async {
+    TextEditingController tc = TextEditingController(text: currentName);
     showDialog(
       context: context,
       builder: (c) => AlertDialog(
@@ -1656,14 +2063,13 @@ class _DetailListScreenState extends State<DetailListScreen> {
         actions: [
           ElevatedButton(
             onPressed: () async {
-              final db = DatabaseHelper._db;
-              await db!.update(
+              await DatabaseHelper.db.update(
                 'codes',
                 {'name': tc.text},
                 where: 'id = ?',
                 whereArgs: [id],
               );
-              Navigator.pop(c);
+              if (c.mounted) Navigator.pop(c);
               _loadItems();
             },
             child: const Text("KAYDET"),
@@ -1676,118 +2082,23 @@ class _DetailListScreenState extends State<DetailListScreen> {
   Future<void> _printLabels() async {
     if (items.isEmpty) return;
     setState(() => creatingPdf = true);
-    await Future.delayed(
-        const Duration(milliseconds: 100));
+    await Future.delayed(const Duration(milliseconds: 100));
     try {
-      await Printing.layoutPdf(
-        name: 'Barkodlar',
-        onLayout: (PdfPageFormat format) async {
-          final doc = pw.Document();
-          final double labelWidth = 140;
-          doc.addPage(
-            pw.MultiPage(
-              pageFormat: format,
-              margin: const pw.EdgeInsets.all(10),
-              build: (pw.Context context) {
-                return [
-                  pw.Wrap(
-                    spacing: 4,
-                    runSpacing: 4,
-                    children: items.map((item) {
-                      String code = item['barcode'];
-                      String name =
-                          item['name'] ?? "İlaç/Ürün";
-                      String gtin =
-                          item['gtin'] ?? "";
-                      Map<String, String> info =
-                          parseGS1ForLabel(code);
-                      return pw.Container(
-                        width: labelWidth,
-                        height: 60,
-                        padding:
-                            const pw.EdgeInsets.all(3),
-                        decoration: pw.BoxDecoration(
-                          border: pw.Border.all(
-                            color: PdfColors.black,
-                            width: 0.5,
-                          ),
-                        ),
-                        child: pw.Row(
-                          children: [
-                            pw.BarcodeWidget(
-                              data: code,
-                              barcode:
-                                  pw.Barcode.dataMatrix(),
-                              width: 54,
-                              height: 54,
-                              drawText: false,
-                            ),
-                            pw.SizedBox(width: 4),
-                            pw.Expanded(
-                              child: pw.Column(
-                                crossAxisAlignment:
-                                    pw.CrossAxisAlignment
-                                        .start,
-                                mainAxisAlignment:
-                                    pw.MainAxisAlignment
-                                        .center,
-                                children: [
-                                  pw.Text(
-                                    name,
-                                    style: pw.TextStyle(
-                                      fontSize: 7,
-                                      fontWeight: pw
-                                          .FontWeight
-                                          .bold,
-                                    ),
-                                    maxLines: 2,
-                                    overflow: pw
-                                        .TextOverflow
-                                        .clip,
-                                  ),
-                                  pw.SizedBox(height: 2),
-                                  pw.Text(
-                                    "GT: $gtin",
-                                    style: const pw
-                                        .TextStyle(
-                                            fontSize: 6),
-                                  ),
-                                  pw.Text(
-                                    "SN: ${info['SN']}",
-                                    style: const pw
-                                        .TextStyle(
-                                            fontSize: 6),
-                                  ),
-                                  pw.Text(
-                                    "SKT: ${info['SKT']}",
-                                    style: pw.TextStyle(
-                                      fontSize: 7,
-                                      fontWeight: pw
-                                          .FontWeight
-                                          .bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                ];
-              },
-            ),
-          );
-          return doc.save();
-        },
-      );
+      await etiketYazdir(items.reversed.toList());
     } catch (e) {
-    } finally {
       if (mounted) {
-        setState(() => creatingPdf = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Etiket hatası: $e')));
       }
+    } finally {
+      if (mounted) setState(() => creatingPdf = false);
     }
+  }
+
+  String _ad(Map<String, dynamic> item) {
+    final n = (item['name'] ?? '').toString();
+    if (n.isNotEmpty && n != 'İlaç/Ürün') return n;
+    return IlacListesi.bul((item['gtin'] ?? '').toString())?.ad ?? 'İlaç/Ürün';
   }
 
   @override
@@ -1798,71 +2109,95 @@ class _DetailListScreenState extends State<DetailListScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.print),
-            onPressed: (items.isEmpty || creatingPdf)
-                ? null
-                : _printLabels,
+            onPressed: (items.isEmpty || creatingPdf) ? null : _printLabels,
           ),
           IconButton(
-            icon: const Icon(Icons.delete_forever,
-                color: Colors.red),
-            onPressed: () {
-              widget.onClear();
-              Navigator.pop(context);
-            },
+            icon: const Icon(Icons.delete_forever, color: Colors.red),
+            onPressed: items.isEmpty ? null : _tumunuSil,
           ),
         ],
       ),
       body: Stack(
         children: [
           loading
-              ? const Center(
-                  child: CircularProgressIndicator(),
-                )
+              ? const Center(child: CircularProgressIndicator())
               : ListView.builder(
                   itemCount: items.length,
                   itemBuilder: (c, i) {
                     final item = items[i];
+                    final code = (item['barcode'] ?? '').toString();
+                    final info = parseGS1ForLabel(code);
+                    final st = analyzeStatus(info['RAW_SKT'] ?? '');
+                    final ilac =
+                        IlacListesi.bul((item['gtin'] ?? '').toString());
+                    final gtin = (item['gtin'] ?? '').toString();
                     return Card(
-                      margin:
-                          const EdgeInsets.symmetric(
-                              horizontal: 5, vertical: 2),
+                      margin: const EdgeInsets.symmetric(
+                          horizontal: 5, vertical: 2),
                       child: ListTile(
                         dense: true,
-                        title: Text(
-                          item['name'] ?? "Ürün",
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
+                        onTap: () => showModalBottomSheet(
+                          context: context,
+                          backgroundColor: Colors.grey[900],
+                          builder: (_) => ilacKarti(
+                              code,
+                              items
+                                  .where((e) => (e['gtin'] ?? '') == gtin)
+                                  .length),
                         ),
-                        subtitle: Text(
-                          item['barcode'],
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontFamily: "monospace",
-                          ),
+                        title: Text(
+                          _ad(item),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              code,
+                              style: const TextStyle(
+                                  fontSize: 10, fontFamily: "monospace"),
+                            ),
+                            Row(
+                              children: [
+                                Text(
+                                  "SKT: ${st.date.isEmpty ? '-' : st.date}  ${st.text}",
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: st.color),
+                                ),
+                                if (ilac != null && ilac.rozet.isNotEmpty)
+                                  Container(
+                                    margin: const EdgeInsets.only(left: 6),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 5, vertical: 1),
+                                    decoration: BoxDecoration(
+                                        color: ilac.rozetRengi,
+                                        borderRadius:
+                                            BorderRadius.circular(4)),
+                                    child: Text(ilac.rozet,
+                                        style: const TextStyle(
+                                            fontSize: 9,
+                                            color: Colors.white)),
+                                  ),
+                              ],
+                            ),
+                          ],
                         ),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             IconButton(
-                              icon: const Icon(
-                                Icons.edit,
-                                color: Colors.blue,
-                              ),
+                              icon: const Icon(Icons.edit, color: Colors.blue),
                               onPressed: () =>
-                                  _updateName(
-                                      item['id'],
-                                      item['name'] ??
-                                          ""),
+                                  _updateName(item['id'], _ad(item)),
                             ),
                             IconButton(
-                              icon: const Icon(
-                                Icons.delete,
-                                color: Colors.red,
-                              ),
-                              onPressed: () =>
-                                  _deleteItem(
-                                      item['id']),
+                              icon:
+                                  const Icon(Icons.delete, color: Colors.red),
+                              onPressed: () => _deleteItem(item),
                             ),
                           ],
                         ),
@@ -1877,15 +2212,12 @@ class _DetailListScreenState extends State<DetailListScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    CircularProgressIndicator(
-                        color: Colors.white),
+                    CircularProgressIndicator(color: Colors.white),
                     SizedBox(height: 20),
                     Text(
                       "PDF Hazırlanıyor...",
                       style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                      ),
+                          color: Colors.white, fontWeight: FontWeight.bold),
                     )
                   ],
                 ),
@@ -2012,6 +2344,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController serverCtrl;
+  late TextEditingController pinCtrl;
   late bool invertMode;
   late String resolution;
 
@@ -2020,6 +2353,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     serverCtrl =
         TextEditingController(text: widget.settings.serverIp);
+    pinCtrl = TextEditingController(text: widget.settings.pin);
     invertMode = widget.settings.invertMode;
     resolution = widget.settings.resolution;
   }
@@ -2031,6 +2365,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         .replaceAll(RegExp(r'/+$'), '');
     if (ip.isNotEmpty && !ip.contains(':')) ip = '$ip:5000';
     await widget.settings.setServerIp(ip);
+    await widget.settings.setPin(pinCtrl.text.trim());
     await widget.settings.setInvertMode(invertMode);
     await widget.settings.setResolution(resolution);
     if (mounted) {
@@ -2058,6 +2393,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   labelText: 'PC IP',
                   prefixIcon: Icon(Icons.computer),
                   border: InputBorder.none,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Card(
+            color: Colors.grey[900],
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: TextField(
+                controller: pinCtrl,
+                keyboardType: TextInputType.number,
+                maxLength: 4,
+                decoration: const InputDecoration(
+                  labelText: 'PIN (sunucuda PIN açıksa; yoksa boş bırakın)',
+                  prefixIcon: Icon(Icons.lock),
+                  border: InputBorder.none,
+                  counterText: '',
                 ),
               ),
             ),
@@ -2171,9 +2524,9 @@ class _FileBrowserScreenState
 
   Future<void> _fetchFiles() async {
     try {
-      final res = await http.get(
-        Uri.parse('http://${widget.serverIp}/files'),
-      );
+      final res = await http
+          .get(sunucuUri(widget.serverIp, '/files'))
+          .timeout(const Duration(seconds: 5));
       if (res.statusCode == 200) {
         setState(() {
           files = List<String>.from(
@@ -2202,8 +2555,7 @@ class _FileBrowserScreenState
       try {
         var request = http.MultipartRequest(
           'POST',
-          Uri.parse(
-              'http://${widget.serverIp}/upload_general'),
+          sunucuUri(widget.serverIp, '/upload_general'),
         );
         for (var file in result.files) {
           if (file.path != null) {
@@ -2278,8 +2630,7 @@ class _FileBrowserScreenState
                           const Icon(Icons.file_present),
                       title: Text(files[i]),
                       onTap: () => launchUrl(
-                        Uri.parse(
-                            'http://${widget.serverIp}/files/${files[i]}'),
+                        sunucuUri(widget.serverIp, '/files/${Uri.encodeComponent(files[i])}'),
                         mode: LaunchMode
                             .externalApplication,
                       ),
@@ -2288,6 +2639,514 @@ class _FileBrowserScreenState
           ),
         ],
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// V61: İlaç kartı (BİLGİ modu ve liste satırına dokununca)
+// ---------------------------------------------------------------------------
+Widget ilacKarti(String code, int sayimAdet) {
+  final info = parseGS1ForLabel(code);
+  final st = analyzeStatus(info['RAW_SKT'] ?? '');
+  final ilac = IlacListesi.bul(info['GTIN'] ?? '');
+
+  Widget satir(String k, String v) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+                width: 95,
+                child: Text(k,
+                    style: const TextStyle(color: Colors.grey, fontSize: 13))),
+            Expanded(
+                child: Text(v.isEmpty ? '-' : v,
+                    style:
+                        const TextStyle(color: Colors.white, fontSize: 14))),
+          ],
+        ),
+      );
+
+  return SafeArea(
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            ilac?.ad ??
+                (IlacListesi.adet == 0
+                    ? 'İlaç listesi henüz yüklenmedi'
+                    : 'İlaç listesinde bulunamadı'),
+            style: const TextStyle(
+                color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          if (ilac != null && ilac.rozet.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.only(top: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                  color: ilac.rozetRengi,
+                  borderRadius: BorderRadius.circular(6)),
+              child: Text(ilac.rozet,
+                  style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: st.color.withOpacity(0.25),
+              border: Border.all(color: st.color, width: 2),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              st.date.isEmpty
+                  ? st.text
+                  : "${st.text}   •   SKT ${st.date}   •   ${st.days} gün",
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15),
+            ),
+          ),
+          const SizedBox(height: 10),
+          satir('Etkin madde', ilac?.etken ?? ''),
+          satir('ATC', ilac?.atc ?? ''),
+          satir('Reçete türü', ilac?.receteTuru ?? ''),
+          satir('Durum', ilac == null ? '' : (ilac.pasif ? 'PASİF' : 'Aktif')),
+          const Divider(color: Colors.white24),
+          satir('GTIN', info['GTIN'] ?? ''),
+          satir('Seri No', info['SN'] ?? ''),
+          satir('LOT', info['LOT'] ?? ''),
+          satir('Sayımda', '$sayimAdet kutu'),
+          if (IlacListesi.surum.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text("TİTCK listesi: ${IlacListesi.surum}",
+                  style: const TextStyle(color: Colors.grey, fontSize: 11)),
+            ),
+        ],
+      ),
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// V61: Etiket (karekod üstte, bilgiler altında, Türkçe font)
+// ---------------------------------------------------------------------------
+Future<void> etiketYazdir(List<Map<String, dynamic>> items,
+    {String ad = 'Etiketler'}) async {
+  if (items.isEmpty) return;
+  final font = pw.Font.ttf(await rootBundle.load('assets/fonts/DejaVuSans.ttf'));
+  final fontB =
+      pw.Font.ttf(await rootBundle.load('assets/fonts/DejaVuSans-Bold.ttf'));
+  await Printing.layoutPdf(
+    name: ad,
+    onLayout: (PdfPageFormat format) async {
+      final doc =
+          pw.Document(theme: pw.ThemeData.withFont(base: font, bold: fontB));
+      const double w = 108, h = 140;
+      doc.addPage(
+        pw.MultiPage(
+          pageFormat: format,
+          margin: const pw.EdgeInsets.all(10),
+          build: (pw.Context context) => [
+            pw.Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: items.map((item) {
+                final code = (item['barcode'] ?? '').toString();
+                final info = parseGS1ForLabel(code);
+                final gtin = (info['GTIN'] ?? '').isNotEmpty
+                    ? info['GTIN']!
+                    : (item['gtin'] ?? '').toString();
+                final ilac = IlacListesi.bul(gtin);
+                final kayitAdi = (item['name'] ?? '').toString();
+                final ad = ilac?.ad ??
+                    (kayitAdi.isNotEmpty ? kayitAdi : 'İlaç/Ürün');
+                return pw.Container(
+                  width: w,
+                  height: h,
+                  padding: const pw.EdgeInsets.all(4),
+                  decoration: pw.BoxDecoration(
+                    border: pw.Border.all(color: PdfColors.black, width: 0.5),
+                  ),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.center,
+                    children: [
+                      pw.BarcodeWidget(
+                        data: code,
+                        barcode: pw.Barcode.dataMatrix(),
+                        width: 62,
+                        height: 62,
+                        drawText: false,
+                      ),
+                      pw.SizedBox(height: 3),
+                      pw.Text(ad,
+                          maxLines: 2,
+                          textAlign: pw.TextAlign.center,
+                          style: pw.TextStyle(
+                              fontSize: 6.5, fontWeight: pw.FontWeight.bold)),
+                      pw.SizedBox(height: 2),
+                      pw.Text('GTIN $gtin',
+                          style: const pw.TextStyle(fontSize: 5.5)),
+                      pw.Text('SN ${info['SN'] ?? ''}',
+                          maxLines: 1, style: const pw.TextStyle(fontSize: 5.5)),
+                      pw.Text(
+                          'LOT ${info['LOT'] ?? ''}   SKT ${info['SKT'] ?? ''}',
+                          maxLines: 1,
+                          style: pw.TextStyle(
+                              fontSize: 6, fontWeight: pw.FontWeight.bold)),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+      );
+      return doc.save();
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// V61: Sayım Özeti / Miad Raporu (ilaç bazında) + CSV'yi PC'ye gönder
+// ---------------------------------------------------------------------------
+class _OzetSatir {
+  final String gtin;
+  String ad = '';
+  IlacBilgi? ilac;
+  int adet = 0;
+  Gs1Status? durum;
+  final List<Map<String, dynamic>> kayitlar = [];
+  _OzetSatir(this.gtin);
+}
+
+class SayimOzetiScreen extends StatefulWidget {
+  final AppSettings settings;
+  const SayimOzetiScreen({super.key, required this.settings});
+
+  @override
+  State<SayimOzetiScreen> createState() => _SayimOzetiScreenState();
+}
+
+class _SayimOzetiScreenState extends State<SayimOzetiScreen> {
+  List<_OzetSatir> satirlar = [];
+  bool loading = true;
+  bool gonderiliyor = false;
+  String filtre = 'tumu';
+
+  @override
+  void initState() {
+    super.initState();
+    _yukle();
+  }
+
+  Future<void> _yukle() async {
+    final rows = await DatabaseHelper.loadAllCodes();
+    final m = <String, _OzetSatir>{};
+    for (final r in rows) {
+      final code = normalizeCode(r['barcode']);
+      final info = parseGS1ForLabel(code);
+      final g = (info['GTIN'] ?? '').isNotEmpty
+          ? info['GTIN']!
+          : (r['gtin'] ?? '').toString();
+      final s = m.putIfAbsent(g, () => _OzetSatir(g));
+      s.adet++;
+      s.kayitlar.add(Map<String, dynamic>.from(r));
+      final st = analyzeStatus(info['RAW_SKT'] ?? '');
+      if (st.date.isNotEmpty && (s.durum == null || st.days < s.durum!.days)) {
+        s.durum = st;
+      }
+    }
+    for (final s in m.values) {
+      s.ilac = IlacListesi.bul(s.gtin);
+      final kayitAdi = (s.kayitlar.first['name'] ?? '').toString();
+      s.ad = s.ilac?.ad ??
+          (kayitAdi.isNotEmpty && kayitAdi != 'İlaç/Ürün' ? kayitAdi : s.gtin);
+    }
+    final l = m.values.toList()..sort((a, b) => a.ad.compareTo(b.ad));
+    if (!mounted) return;
+    setState(() {
+      satirlar = l;
+      loading = false;
+    });
+  }
+
+  List<_OzetSatir> get _gorunen {
+    switch (filtre) {
+      case 'miad3':
+        return satirlar
+            .where((s) => s.durum != null && s.durum!.days <= 90)
+            .toList();
+      case 'gecmis':
+        return satirlar
+            .where((s) => s.durum != null && s.durum!.days < 0)
+            .toList();
+      case 'kontrollu':
+        return satirlar
+            .where((s) =>
+                s.ilac != null &&
+                s.ilac!.receteTuru.isNotEmpty &&
+                s.ilac!.receteTuru != 'Normal')
+            .toList();
+      case 'pasif':
+        return satirlar.where((s) => s.ilac?.pasif == true).toList();
+    }
+    return satirlar;
+  }
+
+  String _csvAlan(String v) => '"${v.replaceAll('"', '""')}"';
+
+  Future<void> _pcyeGonder() async {
+    final ip = widget.settings.serverIp;
+    if (ip.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Önce PC IP ayarlayın')));
+      return;
+    }
+    setState(() => gonderiliyor = true);
+    try {
+      final ozet = StringBuffer(
+          'GTIN;İlaç Adı;Etkin Madde;ATC;Reçete Türü;Durum;Adet;En Yakın SKT;Kalan Gün\n');
+      final detay = StringBuffer(
+          'GTIN;İlaç Adı;Etkin Madde;Reçete Türü;Seri No;LOT;SKT;Kalan Gün;Karekod;Okunma\n');
+      for (final s in satirlar) {
+        final i = s.ilac;
+        ozet.writeln([
+          s.gtin,
+          s.ad,
+          i?.etken ?? '',
+          i?.atc ?? '',
+          i?.receteTuru ?? '',
+          i == null ? '' : (i.pasif ? 'Pasif' : 'Aktif'),
+          '${s.adet}',
+          s.durum?.date ?? '',
+          s.durum == null ? '' : '${s.durum!.days}'
+        ].map(_csvAlan).join(';'));
+        for (final k in s.kayitlar) {
+          final code = (k['barcode'] ?? '').toString();
+          final info = parseGS1ForLabel(code);
+          final st = analyzeStatus(info['RAW_SKT'] ?? '');
+          detay.writeln([
+            s.gtin,
+            s.ad,
+            i?.etken ?? '',
+            i?.receteTuru ?? '',
+            info['SN'] ?? '',
+            info['LOT'] ?? '',
+            st.date,
+            st.date.isEmpty ? '' : '${st.days}',
+            code,
+            (k['scanned_at'] ?? '').toString()
+          ].map(_csvAlan).join(';'));
+        }
+      }
+      final t = DateTime.now();
+      final ek =
+          '${t.year}${t.month.toString().padLeft(2, '0')}${t.day.toString().padLeft(2, '0')}_${t.hour.toString().padLeft(2, '0')}${t.minute.toString().padLeft(2, '0')}';
+      final req =
+          http.MultipartRequest('POST', sunucuUri(ip, '/upload_general'));
+      req.files.add(http.MultipartFile.fromBytes(
+          'file', utf8.encode('﻿$ozet'),
+          filename: 'sayim_ozet_$ek.csv'));
+      req.files.add(http.MultipartFile.fromBytes(
+          'file', utf8.encode('﻿$detay'),
+          filename: 'sayim_detay_$ek.csv'));
+      final res = await req.send().timeout(const Duration(seconds: 60));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(res.statusCode == 200
+              ? "Sayım PC'ye gönderildi (M_ONUR_PAYLASIM klasörü)"
+              : 'PC hatası')));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("PC'ye ulaşılamadı")));
+      }
+    } finally {
+      if (mounted) setState(() => gonderiliyor = false);
+    }
+  }
+
+  Widget _cip(String id, String yazi) => Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: ChoiceChip(
+          label: Text(yazi),
+          selected: filtre == id,
+          onSelected: (_) => setState(() => filtre = id),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final kutu = satirlar.fold<int>(0, (a, s) => a + s.adet);
+    final miad3 = satirlar
+        .where((s) => s.durum != null && s.durum!.days <= 90 && s.durum!.days >= 0)
+        .length;
+    final gecmis =
+        satirlar.where((s) => s.durum != null && s.durum!.days < 0).length;
+    final liste = _gorunen;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Sayım Özeti'),
+        actions: [
+          IconButton(
+            tooltip: "CSV olarak PC'ye gönder",
+            icon: gonderiliyor
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.upload_file),
+            onPressed: (gonderiliyor || satirlar.isEmpty) ? null : _pcyeGonder,
+          ),
+        ],
+      ),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                Container(
+                  margin: const EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                      color: Colors.indigo.shade900,
+                      borderRadius: BorderRadius.circular(8)),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      Text("ÇEŞİT: ${satirlar.length}",
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text("KUTU: $kutu",
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text("≤3 AY: $miad3",
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.orangeAccent)),
+                      Text("GEÇMİŞ: $gecmis",
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.redAccent)),
+                    ],
+                  ),
+                ),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Row(children: [
+                    _cip('tumu', 'Tümü'),
+                    _cip('miad3', 'Miadı ≤3 ay'),
+                    _cip('gecmis', 'Miadı geçmiş'),
+                    _cip('kontrollu', 'Kırmızı/Yeşil/Mor/Turuncu'),
+                    _cip('pasif', 'Pasif'),
+                  ]),
+                ),
+                if (IlacListesi.adet == 0)
+                  const Padding(
+                    padding: EdgeInsets.all(8),
+                    child: Text(
+                        "İlaç listesi yüklü değil: menü → İlaç Listesini Güncelle",
+                        style: TextStyle(color: Colors.orangeAccent)),
+                  ),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: liste.length,
+                    itemBuilder: (c, i) {
+                      final s = liste[i];
+                      final d = s.durum;
+                      return Card(
+                        margin: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        child: ListTile(
+                          dense: true,
+                          leading: CircleAvatar(
+                            backgroundColor: d?.color ?? Colors.grey,
+                            child: Text('${s.adet}',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold)),
+                          ),
+                          title: Text(s.ad,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(
+                              "${s.ilac?.etken ?? ''}${(s.ilac?.etken ?? '').isEmpty ? '' : '  •  '}En yakın SKT: ${d?.date ?? '-'}${d == null ? '' : ' (${d.days} gün)'}"),
+                          trailing: (s.ilac != null && s.ilac!.rozet.isNotEmpty)
+                              ? Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 5, vertical: 2),
+                                  decoration: BoxDecoration(
+                                      color: s.ilac!.rozetRengi,
+                                      borderRadius: BorderRadius.circular(4)),
+                                  child: Text(s.ilac!.rozet,
+                                      style: const TextStyle(
+                                          fontSize: 9, color: Colors.white)),
+                                )
+                              : null,
+                          onTap: () => showModalBottomSheet(
+                            context: context,
+                            backgroundColor: Colors.grey[900],
+                            builder: (bc) => SafeArea(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  ListTile(
+                                    title: Text(s.ad,
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold)),
+                                    subtitle: Text("${s.adet} kutu",
+                                        style: const TextStyle(
+                                            color: Colors.grey)),
+                                  ),
+                                  ListTile(
+                                    leading: const Icon(Icons.print,
+                                        color: Colors.white),
+                                    title: Text(
+                                        "Bu ilacın etiketlerini bas (${s.adet})",
+                                        style: const TextStyle(
+                                            color: Colors.white)),
+                                    onTap: () {
+                                      Navigator.pop(bc);
+                                      etiketYazdir(s.kayitlar, ad: s.ad);
+                                    },
+                                  ),
+                                  ListTile(
+                                    leading: const Icon(Icons.info_outline,
+                                        color: Colors.white),
+                                    title: const Text("İlaç kartı",
+                                        style: TextStyle(color: Colors.white)),
+                                    onTap: () {
+                                      Navigator.pop(bc);
+                                      showModalBottomSheet(
+                                        context: context,
+                                        backgroundColor: Colors.grey[900],
+                                        builder: (_) => ilacKarti(
+                                            normalizeCode(
+                                                s.kayitlar.first['barcode']),
+                                            s.adet),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
     );
   }
 }

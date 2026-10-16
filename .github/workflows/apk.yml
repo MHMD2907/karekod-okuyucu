@@ -1,4 +1,4 @@
-# v1.1 – 2026-10-16: M-ONUR Karekod Okuyucu APK’sı derlenip Releases’a konur (kalıcı imza anahtarıyla); sadece mobil_app_yeni veya bu dosya değişince çalışır
+# v1.2 – 2026-10-16: APK derlenip Releases’a konur; derleme no uygulamaya BUILD_NUMBER olarak geçer (otomatik güncelleme)
 name: APK derle
 
 on:
@@ -57,7 +57,7 @@ jobs:
         run: |
           BN=$((GITHUB_RUN_NUMBER + 3))
           set -o pipefail
-          flutter build apk --release --split-per-abi --build-number=$BN 2>&1 | tee build.log || {
+          flutter build apk --release --split-per-abi --build-number=$BN --dart-define=BUILD_NUMBER=$BN 2>&1 | tee build.log || {
             grep -E "Error|error:|FAILURE|What went wrong|e: " -A3 build.log | head -60 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
           }

@@ -1,7 +1,7 @@
 name: mobil_app_yeni
 description: "M-ONUR Barkod Okuyucu Projesi"
 publish_to: 'none'
-version: 2.1.2+3
+version: 2.2.0+3
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -53,6 +53,8 @@ flutter:
     - assets/default_ok.mp3
     - assets/default_warn.mp3
     - assets/icon.png
+    - assets/fonts/DejaVuSans.ttf
+    - assets/fonts/DejaVuSans-Bold.ttf
 
 # Uygulama simgesi ayarları
 flutter_launcher_icons:
