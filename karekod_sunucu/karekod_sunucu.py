@@ -728,7 +728,7 @@ JSON'a çevirir, Excel'i siler. Telefon bağlanınca listeyi alır. Elle yenilem
 <h3>6. Telefon güncellemesi</h3>
 <p>Sunucu açılışta son telefon sürümünü internetten (GitHub) <b>M_ONUR_GUNCELLEME</b> klasörüne indirir
 (<i>⬇ Telefon Güncellemesini Al</i> ile elle de yapılır). Telefon bağlandığında yeni sürümü görür ve
-"Yeni sürüm var – İNDİR" diye sorar; indirilen dosya açılıp <b>GÜNCELLE</b> denir, liste ve ayarlar korunur.
+yeni sürümü kendisi indirir ve kurulum ekranını açar; <b>GÜNCELLE</b> denir, liste ve ayarlar korunur.
 Telefonun interneti varsa güncellemeyi PC olmadan da kendisi bulur.</p>
 <h3>7. PIN (isteğe bağlı)</h3>
 <p>Aynı Wi-Fi'daki başka cihazların bu PC'ye kod yazdırmasını engeller. <i>⚙ Ayarlar → PIN ile koru</i>.

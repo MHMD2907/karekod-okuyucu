@@ -1,4 +1,5 @@
-// lib/main.dart - V61.1 (2026-10-16): etikette SKT ayrı satır, IP karekodu geri bildirimi, sürüm no, kılavuz, GitHub'dan güncelleme
+// lib/main.dart - V61.2 (2026-10-16): güncelleme uygulama içinde indirilir, kurulum ekranı doğrudan açılır
+// V61.1: etikette SKT ayrı satır, IP karekodu geri bildirimi, sürüm no, kılavuz, GitHub'dan güncelleme
 
 import 'dart:async';
 import 'dart:convert';
@@ -190,7 +191,7 @@ Uri sunucuUri(String ip, String yol) {
 }
 
 const int kDerlemeNo = int.fromEnvironment('BUILD_NUMBER', defaultValue: 0);
-const String kSurum = '2.2.1'; // pubspec.yaml 'version' ile aynı tutulur
+const String kSurum = '2.2.2'; // pubspec.yaml 'version' ile aynı tutulur
 const String kGithubSon =
     'https://api.github.com/repos/MHMD2907/karekod-okuyucu/releases/latest';
 
@@ -1701,8 +1702,13 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     }
   }
 
-  // V61.1: güncelleme önce PC'deki güncelleme klasöründe, yoksa internette (GitHub) aranır
+  // V61.2: güncelleme önce PC'de, yoksa internette (GitHub) aranır; bulunursa uygulama
+  // kendi içinde indirir ve Android kurulum ekranını doğrudan açar (tek dokunuş: GÜNCELLE)
+  static const MethodChannel _gKanal = MethodChannel('monur/guncelleme');
+  bool _guncellemeSuruyor = false;
+
   Future<void> _guncellemeKontrol(String ip, {bool sessiz = false}) async {
+    if (_guncellemeSuruyor) return;
     int enIyi = kDerlemeNo;
     String surum = '';
     Uri? adres;
@@ -1724,56 +1730,151 @@ class _MainScannerScreenState extends State<MainScannerScreen>
         }
       } catch (_) {}
     }
-    try {
-      final r = await http
-          .get(Uri.parse(kGithubSon),
-              headers: {'Accept': 'application/vnd.github+json'})
-          .timeout(const Duration(seconds: 8));
-      if (r.statusCode == 200) {
-        final d = jsonDecode(utf8.decode(r.bodyBytes));
-        final desen = RegExp(r'^M-ONUR-KAREKOD-(\d+\.\d+\.\d+)-(\d+)\.apk$');
-        for (final a in (d['assets'] as List? ?? [])) {
-          final ad = (a['name'] ?? '').toString();
-          final m = desen.firstMatch(ad);
-          if (m == null || ad.contains('eski')) continue;
-          final b = int.parse(m.group(2)!);
-          if (b > enIyi) {
-            enIyi = b;
-            surum = m.group(1)!;
-            adres = Uri.parse(a['browser_download_url']);
-            kaynak = 'İnternetten (GitHub)';
+    if (adres == null) {
+      try {
+        final r = await http
+            .get(Uri.parse(kGithubSon),
+                headers: {'Accept': 'application/vnd.github+json'})
+            .timeout(const Duration(seconds: 8));
+        if (r.statusCode == 200) {
+          final d = jsonDecode(utf8.decode(r.bodyBytes));
+          final desen =
+              RegExp(r'^M-ONUR-KAREKOD-(\d+\.\d+\.\d+)-(\d+)\.apk$');
+          for (final a in (d['assets'] as List? ?? [])) {
+            final ad = (a['name'] ?? '').toString();
+            final m = desen.firstMatch(ad);
+            if (m == null || ad.contains('eski')) continue;
+            final b = int.parse(m.group(2)!);
+            if (b > enIyi) {
+              enIyi = b;
+              surum = m.group(1)!;
+              adres = Uri.parse(a['browser_download_url']);
+              kaynak = 'İnternetten (GitHub)';
+            }
           }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
     if (adres == null) {
       if (!sessiz) {
-        _showTemporaryMessage(
-            "Uygulama güncel ($kSurum / $kDerlemeNo)", const Duration(seconds: 3),
+        _showTemporaryMessage("Uygulama güncel ($kSurum / $kDerlemeNo)",
+            const Duration(seconds: 3),
             color: Colors.green);
       }
       return;
     }
     if (!mounted) return;
-    final indir = await showDialog<bool>(
+
+    // 1) Uygulama içinde indir (ilerleme göstergesiyle)
+    _guncellemeSuruyor = true;
+    final ilerleme = ValueNotifier<double>(0);
+    bool iptal = false;
+    showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (c) => AlertDialog(
-        title: const Text("Yeni sürüm var"),
-        content: Text(
-            "Yüklü: $kSurum (derleme $kDerlemeNo)\nYeni: $surum (derleme $enIyi)\nKaynak: $kaynak\n\nİndirdikten sonra dosyayı açıp GÜNCELLE deyin. Listeniz ve ayarlarınız korunur."),
+        title: Text("Yeni sürüm indiriliyor: $surum"),
+        content: ValueListenableBuilder<double>(
+          valueListenable: ilerleme,
+          builder: (_, v, __) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              LinearProgressIndicator(value: v > 0 ? v : null),
+              const SizedBox(height: 8),
+              Text("${(v * 100).toStringAsFixed(0)} %  •  $kaynak"),
+            ],
+          ),
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(c, false),
-              child: const Text("SONRA")),
-          ElevatedButton(
-              onPressed: () => Navigator.pop(c, true),
-              child: const Text("İNDİR")),
+              onPressed: () {
+                iptal = true;
+                Navigator.pop(c);
+              },
+              child: const Text("VAZGEÇ")),
         ],
       ),
     );
-    if (indir == true) {
-      await launchUrl(adres, mode: LaunchMode.externalApplication);
+    File? dosya;
+    try {
+      final tmp = await getTemporaryDirectory();
+      final klasor = Directory(p.join(tmp.path, 'guncelleme'));
+      if (await klasor.exists()) await klasor.delete(recursive: true);
+      await klasor.create(recursive: true);
+      dosya = File(p.join(klasor.path, 'M-ONUR-KAREKOD-$surum-$enIyi.apk'));
+      final istemci = http.Client();
+      final yanit = await istemci
+          .send(http.Request('GET', adres))
+          .timeout(const Duration(seconds: 30));
+      if (yanit.statusCode != 200) throw Exception('HTTP ${yanit.statusCode}');
+      final toplam = yanit.contentLength ?? 0;
+      final yaz = dosya.openWrite();
+      int alinan = 0;
+      await for (final parca in yanit.stream) {
+        if (iptal) break;
+        yaz.add(parca);
+        alinan += parca.length;
+        if (toplam > 0) ilerleme.value = alinan / toplam;
+      }
+      await yaz.close();
+      istemci.close();
+      if (iptal) throw Exception('iptal');
+      if (toplam > 0 && alinan != toplam) throw Exception('eksik indirme');
+    } catch (e) {
+      if (mounted && !iptal) {
+        Navigator.of(context, rootNavigator: true).pop();
+        _showTemporaryMessage("Güncelleme indirilemedi", const Duration(seconds: 3),
+            color: Colors.red);
+      }
+      _guncellemeSuruyor = false;
+      return;
     }
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+
+    // 2) Kurulum izni (Android "bilinmeyen uygulamalar") – bir kez verilir
+    try {
+      bool izin = await _gKanal.invokeMethod<bool>('izinVarMi') ?? true;
+      if (!izin && mounted) {
+        final ac = await showDialog<bool>(
+          context: context,
+          builder: (c) => AlertDialog(
+            title: const Text("Kurulum izni gerekli"),
+            content: const Text(
+                "Güncellemeyi kurabilmek için bu uygulamaya bir kez \"Bilinmeyen uygulamaları yükle\" izni verin. Açılan ekranda izni açıp geri dönün."),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(c, false),
+                  child: const Text("VAZGEÇ")),
+              ElevatedButton(
+                  onPressed: () => Navigator.pop(c, true),
+                  child: const Text("İZİN VER")),
+            ],
+          ),
+        );
+        if (ac != true) {
+          _guncellemeSuruyor = false;
+          return;
+        }
+        await _gKanal.invokeMethod('izinAyari');
+        // kullanıcı ayardan dönene kadar bekle
+        for (int i = 0; i < 60 && !izin; i++) {
+          await Future.delayed(const Duration(seconds: 1));
+          izin = await _gKanal.invokeMethod<bool>('izinVarMi') ?? false;
+        }
+        if (!izin) {
+          _showTemporaryMessage("İzin verilmedi", const Duration(seconds: 3),
+              color: Colors.red);
+          _guncellemeSuruyor = false;
+          return;
+        }
+      }
+      // 3) Android kurulum ekranı açılır -> GÜNCELLE
+      await _gKanal.invokeMethod('kur', {'yol': dosya.path});
+    } catch (e) {
+      _showTemporaryMessage("Kurulum açılamadı: $e", const Duration(seconds: 4),
+          color: Colors.red);
+    }
+    _guncellemeSuruyor = false;
   }
 
   void _showMenu(BuildContext context) {
@@ -3286,7 +3387,7 @@ class KilavuzScreen extends StatelessWidget {
     [
       "9. Güncelleme",
       "• Telefon PC'ye bağlanınca ve Menü → Uygulama Güncellemesi'nde yeni sürüm arar: önce PC'deki güncelleme klasöründe, yoksa internette.\n"
-          "• Yeni sürüm varsa \"İNDİR\" deyin, inen dosyayı açıp GÜNCELLE deyin. Listeniz ve ayarlarınız korunur.\n"
+          "• Yeni sürüm bulunursa uygulama kendisi indirir ve Android kurulum ekranını açar; GÜNCELLE deyin. İlk seferde bir kez \"bilinmeyen uygulamaları yükle\" izni istenir. Listeniz ve ayarlarınız korunur.\n"
           "• PC'de: sunucuda \"Telefon Güncellemesini Al\" son sürümü internetten çekip telefona hazırlar (internet olmayan telefonlar Wi-Fi'dan alır)."
     ],
     [

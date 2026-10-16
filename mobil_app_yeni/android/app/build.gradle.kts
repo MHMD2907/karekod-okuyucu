@@ -1,4 +1,5 @@
-// v2 – 2026-10-16: release imzası key.properties'ten (GitHub Actions oluşturur); yoksa debug anahtarı
+// v3 – 2026-10-16: androidx.core eklendi (uygulama içi güncelleme FileProvider)
+// v2: release imzası key.properties'ten (GitHub Actions oluşturur); yoksa debug anahtarı
 import java.util.Properties
 
 plugins {
@@ -62,4 +63,8 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
 }
