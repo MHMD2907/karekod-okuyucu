@@ -1,4 +1,5 @@
-# karekod_sunucu.py - V2.1 (2026-10-16): kullanım kılavuzu düğmesi, açılışta telefon güncellemesini GitHub'dan otomatik alma
+# karekod_sunucu.py - V2.2 (2026-10-16): kompakt yan yana düzen, keskin ve küçük QR (pencere ekrana sığar)
+# V2.1: kullanım kılavuzu düğmesi, açılışta telefon güncellemesini GitHub'dan otomatik alma
 # V2.0: PyQt6 modern arayüz, kalıcı havuz, silme/senkron uçları, TİTCK ilaç listesi, APK güncelleme, isteğe bağlı PIN
 # Eski uçlar (V59) aynen korunur: /append_pool /clear_pool /paste_pool /send /package /get_package
 #                                 /upload_general /upload /files /files/<ad> /ping
@@ -32,7 +33,7 @@ except Exception:            # Windows dışı (test)
     pyperclip = None
     keyboard = None
 
-SURUM = "2.1"
+SURUM = "2.2"
 PORT = 5000
 
 # ---------------------------------------------------------------------------
@@ -754,16 +755,18 @@ QCheckBox { background:transparent; }
 """
 
 
-def qr_pixmap(metin, boy=230):
-    q = qrcode.QRCode(box_size=10, border=2)
+def qr_pixmap(metin, boy=160):
+    # V2.2: kare boyu tam piksel seçilir, ölçekleme yok -> keskin, ekrandan kolay okunur
+    q = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
     q.add_data(metin)
     q.make(fit=True)
+    q.box_size = max(2, boy // (q.modules_count + 4))
     img = q.make_image(fill_color="black", back_color="white").convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     pm = QPixmap()
     pm.loadFromData(buf.getvalue(), "PNG")
-    return pm.scaled(boy, boy, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    return pm
 
 
 def ac(yol):
@@ -781,60 +784,52 @@ class AnaPencere(QWidget):
         self.ikon = QIcon(resource_path("icon.png"))
         self.setWindowIcon(self.ikon)
         self.setStyleSheet(STIL)
-        # V2.1: küçük ekranlarda (ör. 1366x768) QR küçülür, pencere ekrana sığar
-        try:
-            ekran_h = QApplication.primaryScreen().availableGeometry().height()
-        except Exception:
-            ekran_h = 1000
-        self.qr_boy = 236 if ekran_h >= 960 else 170
-        self.resize(540, min(940, ekran_h - 40))
+        # V2.2: yan yana kompakt düzen (solda QR, sağda bilgiler) – pencere her ekrana sığar
+        self.qr_boy = 160
+        self.kucuk = True
+        self.resize(580, 660)
 
         kok = QVBoxLayout(self)
-        self.kucuk = self.qr_boy < 200
-        kok.setContentsMargins(*( (10, 8, 10, 8) if self.kucuk else (16, 16, 16, 16) ))
-        kok.setSpacing(6 if self.kucuk else 12)
+        kok.setContentsMargins(12, 12, 12, 12)
+        kok.setSpacing(8)
 
-        # Başlık
-        ust = QHBoxLayout()
-        logo = QLabel()
-        logo.setPixmap(QPixmap(resource_path("icon.png")).scaled(46, 46, Qt.AspectRatioMode.KeepAspectRatio,
-                                                                  Qt.TransformationMode.SmoothTransformation))
-        logo.setStyleSheet("background:transparent;")
-        ust.addWidget(logo)
-        bt = QVBoxLayout()
-        b1 = QLabel("M-ONUR SUNUCU")
-        b1.setObjectName("baslik")
-        b2 = QLabel(f"Karekod okuyucu PC sunucusu  •  v{SURUM}")
-        b2.setObjectName("alt")
-        bt.addWidget(b1)
-        bt.addWidget(b2)
-        ust.addLayout(bt)
-        ust.addStretch()
-        kok.addLayout(ust)
-
-        # QR kartı
         kart = QFrame()
         kart.setObjectName("kart")
-        kart.setSizePolicy(kart.sizePolicy().horizontalPolicy(), kart.sizePolicy().Policy.Fixed)
-        kl = QVBoxLayout(kart)
-        kl.setContentsMargins(*( (10, 8, 10, 8) if self.kucuk else (16, 16, 16, 16) ))
+        kl = QHBoxLayout(kart)
+        kl.setContentsMargins(12, 12, 12, 12)
+        kl.setSpacing(14)
         self.qr_lbl = QLabel()
         self.qr_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.qr_lbl.setStyleSheet("background:white; border-radius:10px; padding:6px;")
-        self.qr_lbl.setFixedSize(self.qr_boy + 14, self.qr_boy + 14)
-        kl.addWidget(self.qr_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
-        kl.addSpacing(10)
+        self.qr_lbl.setStyleSheet("background:white; border-radius:8px;")
+        self.qr_lbl.setFixedSize(self.qr_boy + 12, self.qr_boy + 12)
+        kl.addWidget(self.qr_lbl)
+
+        sag = QVBoxLayout()
+        sag.setSpacing(6)
+        bas = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(QPixmap(resource_path("icon.png")).scaled(36, 36, Qt.AspectRatioMode.KeepAspectRatio,
+                                                                  Qt.TransformationMode.SmoothTransformation))
+        logo.setStyleSheet("background:transparent;")
+        bas.addWidget(logo)
+        b1 = QLabel("M-ONUR SUNUCU")
+        b1.setObjectName("baslik")
+        bas.addWidget(b1)
+        bas.addStretch()
+        sag.addLayout(bas)
+        b2 = QLabel(f"Karekod okuyucu PC sunucusu  •  v{SURUM}")
+        b2.setObjectName("alt")
+        sag.addWidget(b2)
+        sag.addSpacing(6)
         self.ip_lbl = QLabel()
         self.ip_lbl.setObjectName("ip")
-        self.ip_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        kl.addWidget(self.ip_lbl)
-        ipucu = QLabel("Telefonda karekodu okutun ya da bu adresi Ayarlar → PC IP kutusuna yazın")
+        sag.addWidget(self.ip_lbl)
+        ipucu = QLabel("Telefonda bu karekodu okutun ya da adresi telefonda Ayarlar → PC IP kutusuna yazın")
         ipucu.setObjectName("alt")
-        ipucu.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ipucu.setWordWrap(True)
-        if not self.kucuk:
-            kl.addWidget(ipucu)
-        kart.setMinimumHeight(kart.sizeHint().height())
+        sag.addWidget(ipucu)
+        sag.addStretch()
+        kl.addLayout(sag, 1)
         kok.addWidget(kart)
 
         # Durum çipleri
@@ -879,7 +874,7 @@ class AnaPencere(QWidget):
         ak.addWidget(temizle)
         kok.addLayout(ak)
         self.akis = QListWidget()
-        self.akis.setMinimumHeight(60 if self.kucuk else 110)
+        self.akis.setMinimumHeight(90)
         temizle.clicked.connect(self.akis.clear)
         kok.addWidget(self.akis, 1)
 
