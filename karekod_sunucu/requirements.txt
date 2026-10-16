@@ -1,9 +1,8 @@
 flask
-pyautogui
-qrcode
+werkzeug
+qrcode[pil]
 Pillow
-pystray
-pyinstaller
+PyQt6
+openpyxl
 pyperclip
 keyboard
-werkzeug

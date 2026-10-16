@@ -1,4 +1,4 @@
-# v1 – 2026-10-16: Karekod Sunucu EXE'si Windows'ta derlenip Releases'a konur
+# v2 – 2026-10-16: Karekod Sunucu EXE'si (PyQt6) Windows'ta derlenip Releases'a konur
 name: Sunucu EXE derle
 
 on:
@@ -26,7 +26,7 @@ jobs:
           python-version: "3.12"
 
       - name: Kütüphaneler
-        run: pip install flask werkzeug "qrcode[pil]" pillow pystray pyperclip keyboard pyinstaller
+        run: pip install -r requirements.txt pyinstaller
 
       - name: Söz dizimi kontrolü
         run: python -c "import ast;ast.parse(open('karekod_sunucu.py',encoding='utf-8').read());print('ast ok')"
