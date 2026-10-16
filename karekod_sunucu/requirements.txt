@@ -1,0 +1,9 @@
+flask
+pyautogui
+qrcode
+Pillow
+pystray
+pyinstaller
+pyperclip
+keyboard
+werkzeug

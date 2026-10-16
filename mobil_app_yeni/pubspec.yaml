@@ -1,0 +1,64 @@
+name: mobil_app_yeni
+description: "M-ONUR Barkod Okuyucu Projesi"
+publish_to: 'none'
+version: 2.1.0+3
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # --- EKRAN VE ARACLAR ---
+  wakelock_plus: ^1.1.4     # Ekranın kapanmasını engeller
+  url_launcher: ^6.3.0      # Linkleri ve dosyaları açar
+  
+  # --- YAZDIRMA VE PDF (YENİ EKLENDİ) ---
+  pdf: ^3.10.0              # Etiket tasarımı için şart
+  printing: ^5.11.0         # Yazıcıya göndermek için şart
+
+  # --- KAMERA VE BARKOD (HIZLI OKUMA) ---
+  camera: ^0.10.5
+  google_mlkit_barcode_scanning: ^0.11.0
+
+  # --- TEMEL BILESENLER ---
+  cupertino_icons: ^1.0.8
+
+  # --- VERITABANI VE BAGLANTI ---
+  shared_preferences: ^2.2.3
+  http: ^1.2.2
+  path_provider: ^2.1.4
+  sqflite: ^2.3.0
+  path: ^1.8.3
+
+  # --- MEDYA VE DOSYA SEÇİMİ ---
+  audioplayers: ^6.0.0      # Sesli uyarılar için (Warn/Ok)
+  image_picker: ^1.1.2      # Reçete fotoğrafı çekmek için
+  file_picker: ^8.0.0
+  permission_handler: ^11.3.1
+  qr_flutter: ^4.1.0        # Ekranda QR göstermek için
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+
+  # Ses ve Resim dosyalarınızın assets klasöründe olduğundan emin olun
+  assets:
+    - assets/default_ok.mp3
+    - assets/default_warn.mp3
+    - assets/icon.png
+
+# Uygulama simgesi ayarları
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icon.png"

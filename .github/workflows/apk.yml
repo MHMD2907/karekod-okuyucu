@@ -1,0 +1,82 @@
+# v1 – 2026-10-16: M-ONUR Karekod Okuyucu APK'sı derlenip Releases'a konur (kalıcı imza anahtarıyla)
+name: APK derle
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "mobil_app_yeni/**"
+      - ".github/workflows/apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobil_app_yeni
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.35.x"
+          cache: true
+
+      - name: İmza anahtarını hazırla
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::KEYSTORE_BASE64 / KEYSTORE_PASSWORD gizli değişkenleri eksik. Settings > Secrets and variables > Actions altına ekleyin."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > android/app/upload-keystore.jks
+          cat > android/key.properties <<PROPS
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEYSTORE_PASSWORD
+          keyAlias=karekod
+          storeFile=upload-keystore.jks
+          PROPS
+          sed -i 's/^ *//' android/key.properties
+
+      - name: Bağımlılıklar
+        run: flutter pub get
+
+      - name: APK derle
+        run: |
+          BN=$((GITHUB_RUN_NUMBER + 3))
+          set -o pipefail
+          flutter build apk --release --split-per-abi --build-number=$BN 2>&1 | tee build.log || {
+            grep -E "Error|error:|FAILURE|What went wrong|e: " -A3 build.log | head -60 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
+          VN=$(grep '^version:' pubspec.yaml | sed 's/version: *//; s/+.*//')
+          echo "VN=$VN" >> $GITHUB_ENV
+          echo "BN=$BN" >> $GITHUB_ENV
+          cd build/app/outputs/flutter-apk
+          cp app-arm64-v8a-release.apk "$GITHUB_WORKSPACE/M-ONUR-KAREKOD-$VN-$BN.apk"
+          cp app-armeabi-v7a-release.apk "$GITHUB_WORKSPACE/M-ONUR-KAREKOD-$VN-$BN-eski-telefon.apk"
+          ls -la "$GITHUB_WORKSPACE"/*.apk
+
+      - name: Sürüm sayfasına koy
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VN }}-${{ env.BN }}
+          name: Karekod Okuyucu ${{ env.VN }} (derleme ${{ env.BN }})
+          body: |
+            Telefonunuza **M-ONUR-KAREKOD-${{ env.VN }}-${{ env.BN }}.apk** dosyasını kurun (2017 sonrası telefonların hepsi).
+            Sadece çok eski 32-bit telefonlar için: ...-eski-telefon.apk
+            Commit: ${{ github.sha }}
+          files: |
+            M-ONUR-KAREKOD-*.apk

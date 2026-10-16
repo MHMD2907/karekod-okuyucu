@@ -1,0 +1,17 @@
+# Derleme çıktıları ve APK/EXE'ler depoya girmez
+**/build/
+**/dist/
+**/.dart_tool/
+**/.gradle/
+**/.kotlin/
+*.apk
+*.exe
+*.log
+__pycache__/
+# İmza anahtarı ASLA depoya girmez (GitHub Secrets'ta durur)
+*.jks
+*.keystore
+**/key.properties
+**/local.properties
+# TİTCK listesi indirilip JSON'a çevrilir, Excel saklanmaz
+*.xlsx
