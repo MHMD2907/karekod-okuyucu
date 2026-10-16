@@ -1,7 +1,7 @@
 name: mobil_app_yeni
 description: "M-ONUR Barkod Okuyucu Projesi"
 publish_to: 'none'
-version: 2.2.0+3
+version: 2.2.1+3
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

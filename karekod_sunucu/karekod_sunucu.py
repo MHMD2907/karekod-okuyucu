@@ -1,4 +1,5 @@
-# karekod_sunucu.py - V2.0 (2026-10-16): PyQt6 modern arayüz, kalıcı havuz, silme/senkron uçları, TİTCK ilaç listesi, APK güncelleme, isteğe bağlı PIN
+# karekod_sunucu.py - V2.1 (2026-10-16): kullanım kılavuzu düğmesi, açılışta telefon güncellemesini GitHub'dan otomatik alma
+# V2.0: PyQt6 modern arayüz, kalıcı havuz, silme/senkron uçları, TİTCK ilaç listesi, APK güncelleme, isteğe bağlı PIN
 # Eski uçlar (V59) aynen korunur: /append_pool /clear_pool /paste_pool /send /package /get_package
 #                                 /upload_general /upload /files /files/<ad> /ping
 import os
@@ -31,7 +32,7 @@ except Exception:            # Windows dışı (test)
     pyperclip = None
     keyboard = None
 
-SURUM = "2.0"
+SURUM = "2.1"
 PORT = 5000
 
 # ---------------------------------------------------------------------------
@@ -684,6 +685,8 @@ def otomatik_kontroller():
         eski = True
     if eski or not os.path.exists(ILAC_GZ) or any(re.match(r'AKLST02.*\.xlsx$', f, re.I) for f in os.listdir(SERVER_DIR)):
         titck_guncelle()
+    # V2.1: telefona hazır son APK GitHub'dan kendiliğinden alınır (varsa indirilmez)
+    github_apk_indir()
 
 
 def start_flask():
@@ -697,7 +700,41 @@ from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QIcon, QPixmap, QImage, QAction, QFont
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
                              QGridLayout, QListWidget, QFrame, QSystemTrayIcon, QMenu, QMessageBox,
-                             QCheckBox, QDialog, QDialogButtonBox)
+                             QCheckBox, QDialog, QDialogButtonBox, QTextBrowser)
+
+KILAVUZ_HTML = """
+<h2>M-ONUR Sunucu v{SURUM} – Kullanım Kılavuzu</h2>
+<h3>1. Telefonu bağlama</h3>
+<p>Telefonda kamerayı bu penceredeki büyük karekoda tutun; üstte <b>BAĞLI</b> yazar ve burada <b>CİHAZ BAĞLI</b> yeşil olur.
+Olmazsa karekodun altındaki adresi (örn. 192.168.1.20:5000) telefonda <i>Ayarlar → PC IP</i> kutusuna yazın.</p>
+<h3>2. ANLIK mod</h3>
+<p>Telefonda okunan karekod, PC'de <b>imlecin bulunduğu yere</b> (Medula/TEBRP kutusu) yapıştırılır ve Enter'a basılır.
+İmleci önce doğru kutuya koyun.</p>
+<h3>3. LİSTE mod ve Havuz</h3>
+<p>Telefonda sayılan kutular buradaki <b>HAVUZ</b>'a gelir ve diske kaydedilir (PC kapansa da kaybolmaz).
+Telefonda <i>Menü → PC'ye Aktar</i> deyince havuzdaki bütün kodlar imlecin olduğu yere alt alta yapıştırılır.
+<i>📋 Havuzu Göster</i> ile içeriği görebilir, <i>🧹 Havuzu Temizle</i> ile PC tarafını boşaltabilirsiniz.</p>
+<h3>4. Klasörler (Masaüstü)</h3>
+<ul>
+<li><b>M_ONUR_PAKETLER</b> – telefonda oluşturulan paketler (karekodlu HTML + liste)</li>
+<li><b>M_ONUR_PAYLASIM</b> – telefonla paylaşılan dosyalar, sayım CSV'leri</li>
+<li><b>M_ONUR_RESIMLER</b> – telefondan gelen reçete fotoğrafları</li>
+<li><b>M_ONUR_GUNCELLEME</b> – telefona verilecek uygulama güncellemesi (APK)</li>
+</ul>
+<h3>5. İlaç listesi (TİTCK)</h3>
+<p>Sunucu TİTCK <i>SKRS E-Reçete İlaç ve Diğer Farmasötik Ürünler Listesi</i>'ni haftada bir kendisi kontrol edip indirir,
+JSON'a çevirir, Excel'i siler. Telefon bağlanınca listeyi alır. Elle yenilemek için <i>💊 İlaç Listesini Güncelle</i>.</p>
+<h3>6. Telefon güncellemesi</h3>
+<p>Sunucu açılışta son telefon sürümünü internetten (GitHub) <b>M_ONUR_GUNCELLEME</b> klasörüne indirir
+(<i>⬇ Telefon Güncellemesini Al</i> ile elle de yapılır). Telefon bağlandığında yeni sürümü görür ve
+"Yeni sürüm var – İNDİR" diye sorar; indirilen dosya açılıp <b>GÜNCELLE</b> denir, liste ve ayarlar korunur.
+Telefonun interneti varsa güncellemeyi PC olmadan da kendisi bulur.</p>
+<h3>7. PIN (isteğe bağlı)</h3>
+<p>Aynı Wi-Fi'daki başka cihazların bu PC'ye kod yazdırmasını engeller. <i>⚙ Ayarlar → PIN ile koru</i>.
+Açınca PIN karekoda eklenir; telefonda karekodu bir kez yeniden okutun.</p>
+<h3>8. Kapatma</h3>
+<p>Pencerenin X'i sunucuyu kapatmaz, sağ alttaki simgeye gizler. Tamamen kapatmak için simgeye sağ tıklayıp <b>Kapat</b>.</p>
+"""
 
 STIL = """
 QWidget { background:#0f1324; color:#e6e9f2; font-family:'Segoe UI'; font-size:10pt; }
@@ -744,12 +781,18 @@ class AnaPencere(QWidget):
         self.ikon = QIcon(resource_path("icon.png"))
         self.setWindowIcon(self.ikon)
         self.setStyleSheet(STIL)
-        self.resize(540, 880)
-        self.setMinimumSize(500, 820)
+        # V2.1: küçük ekranlarda (ör. 1366x768) QR küçülür, pencere ekrana sığar
+        try:
+            ekran_h = QApplication.primaryScreen().availableGeometry().height()
+        except Exception:
+            ekran_h = 1000
+        self.qr_boy = 236 if ekran_h >= 960 else 170
+        self.resize(540, min(940, ekran_h - 40))
 
         kok = QVBoxLayout(self)
-        kok.setContentsMargins(16, 16, 16, 16)
-        kok.setSpacing(12)
+        self.kucuk = self.qr_boy < 200
+        kok.setContentsMargins(*( (10, 8, 10, 8) if self.kucuk else (16, 16, 16, 16) ))
+        kok.setSpacing(6 if self.kucuk else 12)
 
         # Başlık
         ust = QHBoxLayout()
@@ -774,11 +817,11 @@ class AnaPencere(QWidget):
         kart.setObjectName("kart")
         kart.setSizePolicy(kart.sizePolicy().horizontalPolicy(), kart.sizePolicy().Policy.Fixed)
         kl = QVBoxLayout(kart)
-        kl.setContentsMargins(16, 16, 16, 16)
+        kl.setContentsMargins(*( (10, 8, 10, 8) if self.kucuk else (16, 16, 16, 16) ))
         self.qr_lbl = QLabel()
         self.qr_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_lbl.setStyleSheet("background:white; border-radius:10px; padding:6px;")
-        self.qr_lbl.setFixedSize(250, 250)
+        self.qr_lbl.setFixedSize(self.qr_boy + 14, self.qr_boy + 14)
         kl.addWidget(self.qr_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
         kl.addSpacing(10)
         self.ip_lbl = QLabel()
@@ -789,7 +832,9 @@ class AnaPencere(QWidget):
         ipucu.setObjectName("alt")
         ipucu.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ipucu.setWordWrap(True)
-        kl.addWidget(ipucu)
+        if not self.kucuk:
+            kl.addWidget(ipucu)
+        kart.setMinimumHeight(kart.sizeHint().height())
         kok.addWidget(kart)
 
         # Durum çipleri
@@ -813,6 +858,7 @@ class AnaPencere(QWidget):
             ("🖼 Resimler", lambda: ac(IMG_PATH), ""), ("💊 İlaç Listesini Güncelle", self.ilac_guncelle, "mavi"),
             ("⬇ Telefon Güncellemesini Al", self.apk_al, "mavi"), ("📂 Güncelleme Klasörü", lambda: ac(UPDATE_PATH), ""),
             ("🧹 Havuzu Temizle", self.havuz_temizle, "kirmizi"), ("⚙ Ayarlar", self.ayarlar, ""),
+            ("❓ Kullanım Kılavuzu", self.kilavuz, ""), ("📋 Havuzu Göster", self.havuz_goster, ""),
         ]
         for i, (t, f, ad) in enumerate(dugmeler):
             b = QPushButton(t)
@@ -833,7 +879,7 @@ class AnaPencere(QWidget):
         ak.addWidget(temizle)
         kok.addLayout(ak)
         self.akis = QListWidget()
-        self.akis.setMinimumHeight(150)
+        self.akis.setMinimumHeight(60 if self.kucuk else 110)
         temizle.clicked.connect(self.akis.clear)
         kok.addWidget(self.akis, 1)
 
@@ -873,7 +919,7 @@ class AnaPencere(QWidget):
         t = qr_metni()
         if getattr(self, "_son_qr", None) != t:
             self._son_qr = t
-            self.qr_lbl.setPixmap(qr_pixmap(t, 236))
+            self.qr_lbl.setPixmap(qr_pixmap(t, self.qr_boy))
             pin = f"   PIN: {AYARLAR['pin']}" if AYARLAR.get("pin_aktif") else ""
             self.ip_lbl.setText(f"{get_ip()}:{PORT}{pin}")
 
@@ -948,6 +994,40 @@ class AnaPencere(QWidget):
             self._son_qr = None
             self.qr_yenile()
             log("PIN " + ("AÇIK" if cb.isChecked() else "KAPALI"))
+
+    def kilavuz(self):
+        d = QDialog(self)
+        d.setWindowTitle("Kullanım Kılavuzu")
+        d.setStyleSheet(STIL)
+        d.resize(620, 680)
+        lay = QVBoxLayout(d)
+        t = QTextBrowser()
+        t.setHtml(KILAVUZ_HTML.replace("{SURUM}", SURUM))
+        t.setStyleSheet("QTextBrowser{background:#0b0f1d;border:1px solid #262d4d;border-radius:10px;padding:8px;font-size:10pt;}")
+        lay.addWidget(t)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(d.reject)
+        lay.addWidget(bb)
+        d.exec()
+
+    def havuz_goster(self):
+        kodlar = HAVUZ.kopya()
+        d = QDialog(self)
+        d.setWindowTitle(f"PC Havuzu ({len(kodlar)} kutu)")
+        d.setStyleSheet(STIL)
+        d.resize(620, 520)
+        lay = QVBoxLayout(d)
+        lst = QListWidget()
+        ilaclar = json_oku(ILAC_JSON, {}).get("ilaclar", {}) if kodlar else {}
+        for c in kodlar:
+            g = c[2:16] if c.startswith("01") and len(c) >= 16 else ""
+            ad = (ilaclar.get(g) or [""])[0]
+            lst.addItem(f"{ad[:40]:<40}  {c}" if ad else c)
+        lay.addWidget(lst)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(d.reject)
+        lay.addWidget(bb)
+        d.exec()
 
     def goster(self):
         self.showNormal()

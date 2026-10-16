@@ -1,4 +1,4 @@
-// lib/main.dart - V61.0 (2026-10-16): ilaç adı (TİTCK), BİLGİ modu, sayım özeti, PC senkronu, yeni etiket, otomatik güncelleme, PIN
+// lib/main.dart - V61.1 (2026-10-16): etikette SKT ayrı satır, IP karekodu geri bildirimi, sürüm no, kılavuz, GitHub'dan güncelleme
 
 import 'dart:async';
 import 'dart:convert';
@@ -190,6 +190,9 @@ Uri sunucuUri(String ip, String yol) {
 }
 
 const int kDerlemeNo = int.fromEnvironment('BUILD_NUMBER', defaultValue: 0);
+const String kSurum = '2.2.1'; // pubspec.yaml 'version' ile aynı tutulur
+const String kGithubSon =
+    'https://api.github.com/repos/MHMD2907/karekod-okuyucu/releases/latest';
 
 Map<String, dynamic> jsonCozIsolate(String s) =>
     jsonDecode(s) as Map<String, dynamic>;
@@ -738,16 +741,31 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     if (ipEs != null) {
       final ip = ipEs.group(1)!;
       final pin = ipEs.group(2) ?? '';
+      // V61.1: karekod kadrajda durdukça tekrar tekrar işlenmez (3 sn)
+      final simdi = DateTime.now();
+      final son = _anlikSonGorulme['#IP#'];
+      _anlikSonGorulme['#IP#'] = simdi;
+      if (son != null && simdi.difference(son).inMilliseconds < 3000) {
+        return false;
+      }
+      _playBeep(warning: false);
       if (settings?.serverIp != ip || settings?.pin != pin) {
         settings?.setServerIp(ip);
         settings?.setPin(pin);
         _sunucuKontrolYapildi = false;
         isConnected = false;
         _showTemporaryMessage(
-            'IP: $ip${pin.isNotEmpty ? " (PIN)" : ""}', const Duration(seconds: 3),
+            'IP KAYDEDİLDİ: $ip${pin.isNotEmpty ? " (PIN)" : ""}',
+            const Duration(seconds: 3),
             color: Colors.cyanAccent);
-        _testServerConnection(ip);
+      } else {
+        // V61.1: eskiden IP aynıysa hiçbir şey olmuyordu, "olmadı" sanılıyordu
+        _showTemporaryMessage(
+            isConnected ? 'ZATEN BAĞLI: $ip' : 'BAĞLANILIYOR: $ip',
+            const Duration(seconds: 3),
+            color: Colors.cyanAccent);
       }
+      _testServerConnection(ip);
       return false;
     }
 
@@ -1683,48 +1701,78 @@ class _MainScannerScreenState extends State<MainScannerScreen>
     }
   }
 
+  // V61.1: güncelleme önce PC'deki güncelleme klasöründe, yoksa internette (GitHub) aranır
   Future<void> _guncellemeKontrol(String ip, {bool sessiz = false}) async {
+    int enIyi = kDerlemeNo;
+    String surum = '';
+    Uri? adres;
+    String kaynak = '';
+    if (ip.isNotEmpty) {
+      try {
+        final r = await http
+            .get(sunucuUri(ip, '/surum'))
+            .timeout(const Duration(seconds: 5));
+        if (r.statusCode == 200) {
+          final d = jsonDecode(utf8.decode(r.bodyBytes));
+          final int b = (d['build'] ?? 0) as int;
+          if (d['apk'] != null && b > enIyi) {
+            enIyi = b;
+            surum = (d['version'] ?? '').toString();
+            adres = sunucuUri(ip, '/guncelleme/${d['apk']}');
+            kaynak = "PC'den (Wi-Fi)";
+          }
+        }
+      } catch (_) {}
+    }
     try {
       final r = await http
-          .get(sunucuUri(ip, '/surum'))
-          .timeout(const Duration(seconds: 5));
-      if (r.statusCode != 200) return;
-      final d = jsonDecode(utf8.decode(r.bodyBytes));
-      final apk = d['apk'];
-      final int build = (d['build'] ?? 0) as int;
-      if (apk == null || build <= kDerlemeNo) {
-        if (!sessiz) {
-          _showTemporaryMessage("Uygulama güncel", const Duration(seconds: 2),
-              color: Colors.green);
+          .get(Uri.parse(kGithubSon),
+              headers: {'Accept': 'application/vnd.github+json'})
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode == 200) {
+        final d = jsonDecode(utf8.decode(r.bodyBytes));
+        final desen = RegExp(r'^M-ONUR-KAREKOD-(\d+\.\d+\.\d+)-(\d+)\.apk$');
+        for (final a in (d['assets'] as List? ?? [])) {
+          final ad = (a['name'] ?? '').toString();
+          final m = desen.firstMatch(ad);
+          if (m == null || ad.contains('eski')) continue;
+          final b = int.parse(m.group(2)!);
+          if (b > enIyi) {
+            enIyi = b;
+            surum = m.group(1)!;
+            adres = Uri.parse(a['browser_download_url']);
+            kaynak = 'İnternetten (GitHub)';
+          }
         }
-        return;
       }
-      if (!mounted) return;
-      final indir = await showDialog<bool>(
-        context: context,
-        builder: (c) => AlertDialog(
-          title: const Text("Yeni sürüm hazır"),
-          content: Text(
-              "Sürüm ${d['version']} (derleme $build) PC'de hazır.\n\nİndirdikten sonra dosyayı açıp GÜNCELLE deyin. Listeniz ve ayarlarınız korunur."),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(c, false),
-                child: const Text("SONRA")),
-            ElevatedButton(
-                onPressed: () => Navigator.pop(c, true),
-                child: const Text("İNDİR")),
-          ],
-        ),
-      );
-      if (indir == true) {
-        await launchUrl(sunucuUri(ip, '/guncelleme/$apk'),
-            mode: LaunchMode.externalApplication);
-      }
-    } catch (_) {
+    } catch (_) {}
+    if (adres == null) {
       if (!sessiz) {
-        _showTemporaryMessage("PC'ye ulaşılamadı", const Duration(seconds: 2),
-            color: Colors.red);
+        _showTemporaryMessage(
+            "Uygulama güncel ($kSurum / $kDerlemeNo)", const Duration(seconds: 3),
+            color: Colors.green);
       }
+      return;
+    }
+    if (!mounted) return;
+    final indir = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text("Yeni sürüm var"),
+        content: Text(
+            "Yüklü: $kSurum (derleme $kDerlemeNo)\nYeni: $surum (derleme $enIyi)\nKaynak: $kaynak\n\nİndirdikten sonra dosyayı açıp GÜNCELLE deyin. Listeniz ve ayarlarınız korunur."),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text("SONRA")),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text("İNDİR")),
+        ],
+      ),
+    );
+    if (indir == true) {
+      await launchUrl(adres, mode: LaunchMode.externalApplication);
     }
   }
 
@@ -1738,6 +1786,26 @@ class _MainScannerScreenState extends State<MainScannerScreen>
               child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          ListTile(
+            dense: true,
+            title: Text("M-ONUR Karekod $kSurum  •  derleme $kDerlemeNo",
+                style: const TextStyle(color: Colors.grey)),
+            subtitle: Text(
+                "İlaç listesi: ${IlacListesi.adet} ürün ${IlacListesi.surum.isEmpty ? '' : '(${IlacListesi.surum})'}",
+                style: const TextStyle(color: Colors.grey, fontSize: 11)),
+          ),
+          ListTile(
+            leading: const Icon(Icons.menu_book, color: Colors.amber),
+            title: const Text(
+              "Kullanım Kılavuzu",
+              style: TextStyle(color: Colors.white),
+            ),
+            onTap: () {
+              Navigator.pop(c);
+              Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const KilavuzScreen()));
+            },
+          ),
           ListTile(
             leading:
                 const Icon(Icons.list, color: Colors.blue),
@@ -1793,8 +1861,7 @@ class _MainScannerScreenState extends State<MainScannerScreen>
             ),
             onTap: () {
               Navigator.pop(c);
-              final ip = settings?.serverIp ?? '';
-              if (ip.isNotEmpty) _guncellemeKontrol(ip);
+              _guncellemeKontrol(settings?.serverIp ?? '');
             },
           ),
           const Divider(),
@@ -2491,6 +2558,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child:
                 const Text("Dosyaları İndir / Yükle"),
           ),
+          const SizedBox(height: 24),
+          Center(
+            child: Text(
+              "M-ONUR Karekod Okuyucu $kSurum (derleme $kDerlemeNo)",
+              style: const TextStyle(color: Colors.grey),
+            ),
+          ),
         ],
       ),
     );
@@ -2796,11 +2870,15 @@ Future<void> etiketYazdir(List<Map<String, dynamic>> items,
                           style: const pw.TextStyle(fontSize: 5.5)),
                       pw.Text('SN ${info['SN'] ?? ''}',
                           maxLines: 1, style: const pw.TextStyle(fontSize: 5.5)),
+                      pw.Text('LOT ${info['LOT'] ?? ''}',
+                          maxLines: 1, style: const pw.TextStyle(fontSize: 5.5)),
+                      pw.SizedBox(height: 1),
+                      // V61.1: SKT ayrı satırda ve büyük (eskiden LOT uzunsa kesiliyordu)
                       pw.Text(
-                          'LOT ${info['LOT'] ?? ''}   SKT ${info['SKT'] ?? ''}',
+                          'SKT ${(info['SKT'] ?? '').isEmpty ? '-' : info['SKT']}',
                           maxLines: 1,
                           style: pw.TextStyle(
-                              fontSize: 6, fontWeight: pw.FontWeight.bold)),
+                              fontSize: 8, fontWeight: pw.FontWeight.bold)),
                     ],
                   ),
                 );
@@ -3147,6 +3225,105 @@ class _SayimOzetiScreenState extends State<SayimOzetiScreen> {
                 ),
               ],
             ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// V61.1: Kullanım Kılavuzu
+// ---------------------------------------------------------------------------
+class KilavuzScreen extends StatelessWidget {
+  const KilavuzScreen({super.key});
+
+  static const List<List<String>> _bolumler = [
+    [
+      "1. PC'ye bağlanma",
+      "• PC'de M-ONUR Sunucu'yu açın.\n"
+          "• Telefonda kamerayı sunucu ekranındaki büyük karekoda tutun. \"IP KAYDEDİLDİ\" ya da \"ZATEN BAĞLI\" yazar, üstte BAĞLI (yeşil) görünür.\n"
+          "• Olmazsa: ⚙ Ayarlar → PC IP kutusuna sunucuda yazan adresi yazın (örn. 192.168.1.20:5000).\n"
+          "• Sunucuda PIN açıksa PIN karekodun içindedir; elle girerken Ayarlar → PIN kutusuna yazın."
+    ],
+    [
+      "2. ANLIK mod (Medula'ya gönder)",
+      "• Okunan karekod PC'de imlecin olduğu yere yapıştırılır ve Enter'a basılır.\n"
+          "• Kutu kadrajda durdukça tekrar gönderilmez; kadrajdan çıkarıp 4 sn sonra yeniden okutabilirsiniz."
+    ],
+    [
+      "3. LİSTE mod (sayım / biriktir)",
+      "• Kadrajdaki bütün karekodlar okunur ve kaydedilir; aynı kutu ikinci kez sayılmaz (\"LİSTEDE VAR\").\n"
+          "• Çerçeve renkleri: kırmızı = miadı geçmiş, mor = 1 aydan az, mavi = 2 aydan az, turuncu = 3 aydan az, yeşil = geçerli, sarı = zaten listede.\n"
+          "• Miadı geçmiş kutu listeye alınmaz, uyarı sesi çalar.\n"
+          "• Menü → PC'ye Aktar: tüm liste PC'ye yapıştırılır, sonra \"Temizle / Sakla\" sorulur.\n"
+          "• Liste PC olmadan da telefonda saklanır; sınır telefonun hafızasıdır."
+    ],
+    [
+      "4. BİLGİ modu",
+      "• Hiçbir şey kaydedilmez veya gönderilmez. Okutulan kutunun kartı açılır: ilaç adı, etkin madde, ATC, reçete türü, aktif/pasif, SKT ve kalan gün, seri no, LOT, sayımdaki adet."
+    ],
+    [
+      "5. İlaç adları (TİTCK listesi)",
+      "• Sunucu TİTCK SKRS E-Reçete listesini haftada bir kendisi indirir.\n"
+          "• Telefon PC'ye bağlanınca listeyi alır ve hafızasına kaydeder; sonra PC olmadan da adları gösterir.\n"
+          "• Elle yenilemek için: Menü → İlaç Listesini Güncelle.\n"
+          "• Kırmızı/yeşil/mor/turuncu reçeteli ve pasif ürünlerde renkli rozet çıkar."
+    ],
+    [
+      "6. Liste, Sayım Özeti ve etiket",
+      "• Menü → Listeyi Görüntüle: her kutu, SKT'si ile. Satıra dokunun → ilaç kartı. Çöp kutusu tek kaydı siler (PC havuzundan da düşer). Üstteki kırmızı simge tümünü siler (onay ister).\n"
+          "• Yazıcı simgesi: tüm liste için etiket (karekod üstte; ad, GTIN, SN, LOT, SKT altta). Android yazdırma ekranından yazıcı seçin ya da PDF kaydedin.\n"
+          "• Menü → Sayım Özeti: ilaç bazında adet ve en yakın SKT; filtreler (≤3 ay, geçmiş, kontrollü, pasif). İlaca dokunun → sadece o ilacın etiketleri. Sağ üst simge → sayım CSV olarak PC'deki M_ONUR_PAYLASIM klasörüne gider (Excel'de açılır)."
+    ],
+    [
+      "7. Paketler",
+      "• Menü → Paket Oluştur: listeye ad verin, karekodu çıkar. PC'ye Kaydet ile PC'deki M_ONUR_PAKETLER klasörüne kaydedilir.\n"
+          "• Paket karekodunu başka zaman okutunca o paketteki kutular listeye geri yüklenir."
+    ],
+    [
+      "8. Foto ve dosya",
+      "• FOTO / GALERİ: reçete fotoğrafları PC'deki M_ONUR_RESIMLER klasörüne gider.\n"
+          "• ⚙ Ayarlar → Dosyaları İndir/Yükle: PC'deki M_ONUR_PAYLASIM klasörüyle dosya alışverişi."
+    ],
+    [
+      "9. Güncelleme",
+      "• Telefon PC'ye bağlanınca ve Menü → Uygulama Güncellemesi'nde yeni sürüm arar: önce PC'deki güncelleme klasöründe, yoksa internette.\n"
+          "• Yeni sürüm varsa \"İNDİR\" deyin, inen dosyayı açıp GÜNCELLE deyin. Listeniz ve ayarlarınız korunur.\n"
+          "• PC'de: sunucuda \"Telefon Güncellemesini Al\" son sürümü internetten çekip telefona hazırlar (internet olmayan telefonlar Wi-Fi'dan alır)."
+    ],
+    [
+      "10. Ayarlar",
+      "• Siyah zemin modu: siyah zemin üzerine beyaz basılmış (ters) karekodlar için.\n"
+          "• Kamera çözünürlüğü: Orta en hızlısıdır; küçük/zor karekodlarda Yüksek seçin."
+    ],
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Kullanım Kılavuzu")),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Text("M-ONUR Karekod Okuyucu $kSurum (derleme $kDerlemeNo)",
+              style: const TextStyle(color: Colors.grey)),
+          const SizedBox(height: 8),
+          for (final b in _bolumler)
+            Card(
+              color: Colors.grey[900],
+              child: ExpansionTile(
+                title: Text(b[0],
+                    style: const TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.bold)),
+                childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                expandedCrossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(b[1],
+                      style: const TextStyle(
+                          color: Colors.white70, fontSize: 14, height: 1.4)),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
