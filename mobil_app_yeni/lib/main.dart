@@ -1,4 +1,4 @@
-// lib/main.dart - V60.1_FINAL_PERFORMANCE (SMART INVERT + STABLE UI + FIXES)
+// lib/main.dart - V60.2 (2026-10-16): IP karekodu ham metinden okunuyor + IP'ye :5000 otomatik ekleniyor
 
 import 'dart:async';
 import 'dart:convert';
@@ -561,24 +561,22 @@ class _MainScannerScreenState extends State<MainScannerScreen>
   }
 
   bool _processFoundCodeFast(String rawCode) {
+    // V60.2: Sunucu IP karekodu normalizeCode'dan ÖNCE ham metinden kontrol edilir
+    // (normalizeCode nokta ve iki noktayı sildiği için IP hiç tanınmıyordu)
+    final String rawTrim = rawCode.trim();
+    if (RegExp(r'^\d{1,3}(\.\d{1,3}){3}:\d+$').hasMatch(rawTrim)) {
+      if (settings?.serverIp != rawTrim) {
+        settings?.setServerIp(rawTrim);
+        _showTemporaryMessage(
+            'IP: $rawTrim', const Duration(seconds: 3),
+            color: Colors.cyanAccent);
+        _testServerConnection(rawTrim);
+      }
+      return false;
+    }
+
     String code = normalizeCode(rawCode);
     if (code.isEmpty) return false;
-
-    if (code.length < 20 &&
-        code.contains('.') &&
-        code.contains(':')) {
-      if (RegExp(r'^\d{1,3}(\.\d{1,3}){3}:\d+$')
-          .hasMatch(code)) {
-        if (settings?.serverIp != code) {
-          settings?.setServerIp(code);
-          _showTemporaryMessage(
-              'IP: $code', const Duration(seconds: 3),
-              color: Colors.cyanAccent);
-          _testServerConnection(code);
-        }
-        return false;
-      }
-    }
 
     if (code.length < 50 && !code.startsWith("01")) {
       if (DateTime.now()
@@ -1993,8 +1991,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _save() async {
-    await widget.settings
-        .setServerIp(serverCtrl.text.trim());
+    // V60.2: "http://" yazılırsa temizlenir, port yazılmazsa :5000 eklenir
+    String ip = serverCtrl.text.trim()
+        .replaceAll(RegExp(r'^https?://'), '')
+        .replaceAll(RegExp(r'/+$'), '');
+    if (ip.isNotEmpty && !ip.contains(':')) ip = '$ip:5000';
+    await widget.settings.setServerIp(ip);
     await widget.settings.setInvertMode(invertMode);
     await widget.settings.setResolution(resolution);
     if (mounted) {
